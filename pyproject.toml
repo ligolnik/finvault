@@ -1,0 +1,38 @@
+[project]
+name = "finvault"
+version = "0.1.0"
+description = "Keep folders in encrypted APFS sparse bundles on macOS, unlocked at their own paths"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+finvault = "finvault.cli:main"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "BLE", "SIM", "RUF", "PL"]
+ignore = [
+  "PLR0911", "PLR0912", "PLR0913", "PLR0915",  # command functions are long by nature
+  "PLR2004",                                    # tests compare against literal values
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["finvault", "tests"]
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.11"
+typeCheckingMode = "strict"
+executionEnvironments = [{ root = "src" }, { root = "tests", extraPaths = ["src", "."] }]

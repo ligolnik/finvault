@@ -1,0 +1,47 @@
+# finvault example config. Copy it to ~/.finvault/config.toml (or any path you
+# pass with --config) and replace the placeholder folders with your own.
+# Each vault has its own config file and its own state_dir; two vaults must
+# never share a state_dir.
+
+# Required. Holds this vault's images/, archive/ and mnt/ (temporary mountpoints).
+state_dir = "~/.finvault"
+
+[image]
+# Default size cap for an image: size_factor times the folder's current size,
+# and never below min_size_gb. A folder's own `size` overrides both.
+min_size_gb = 1
+size_factor = 4
+
+# One [[folders]] table per folder to keep in the vault. `name` names the image
+# (lowercase letters, digits, . _ -). `path` is unlocked at exactly that path.
+[[folders]]
+name = "docs"
+path = "~/Example/Docs"
+
+[[folders]]
+name = "photos"
+path = "~/Example/Photos"
+size = "20g"
+
+# Claude Code keeps each project's transcripts under ~/.claude/projects/<path
+# with slashes turned into dashes>. Vault that folder too so transcripts and
+# memory are encrypted with the project.
+[[folders]]
+name = "docs-claude"
+path = "~/.claude/projects/-Users-example-Example-Docs"
+
+[sweep]
+# Set to false to turn the sweep off for this vault.
+enabled = true
+# The vault folder that keeps swept items, in a subfolder named archive_subdir.
+archive_folder = "docs"
+archive_subdir = ".finvault-sweep"
+# Claude Code's shared files. Each path below defaults to a file under claude_dir.
+claude_dir = "~/.claude"
+# history = "~/.claude/history.jsonl"
+# file_history = "~/.claude/file-history"
+# paste_cache = "~/.claude/paste-cache"
+# projects_dir = "~/.claude/projects"
+# Scratchpad folders to delete at each lock: glob patterns for names directly
+# under scratch_root (default /private/tmp/claude-<your uid>).
+scratch_globs = ["*Example-Docs*", "*Example-Photos*"]

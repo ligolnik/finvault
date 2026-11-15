@@ -1,0 +1,5 @@
+# Lint, type-check and shell-check tools for CI and scripts/check.sh.
+# Dependabot (.github/dependabot.yml) proposes updates to these pins.
+ruff==0.17.5
+pyright==1.1.414
+shellcheck-py==0.11.0.1

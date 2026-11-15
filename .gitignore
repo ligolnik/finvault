@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# Built zipapp
+*.pyz
+
+# Disk images and local configs never belong in the repo
+*.sparsebundle/
+*.sparseimage
+*.dmg
+config.toml
+!config.example.toml
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Agent metafiles
+.claude/
+.tessl/

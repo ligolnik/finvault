@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.10 — 2026-11-16
+
+### Added
+
+- An agent skill, `skills/finvault/SKILL.md`, for AI agents working on a Mac with a vault: recognise a vault folder, leave a locked one alone and ask the human to unlock it (never touching the passphrase or permissions), explain `finvault status` in plain words, leave the vault before the human locks, and relay a failed `lock` without retrying with `--force` or `--skip-sweep`. The agent runs only `finvault status` itself. `tests/test_skill.py` checks every command and flag it names against the real parser, and every JSON key it names against the code. The README says how to install it for Claude Code and Codex (issue #6).
+
 ## 0.1.9 — 2026-11-16
 
 ### Fixed

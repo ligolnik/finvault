@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from finvault.config import SweepSettings
 from finvault.errors import ConcurrentChangeError, FinvaultError
 from finvault.jsonutil import as_dict
-from finvault.pathutil import append_fsync, fsync_dir, is_under, is_under_any, write_temp_beside
+from finvault.pathutil import append_fsync, ensure_dir_inside, fsync_dir, is_under, is_under_any, write_temp_beside
 
 HASH_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 SESSION_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
@@ -90,7 +90,11 @@ def paste_hashes(line: bytes) -> set[str]:
 
 
 def pastes_to_move(kept: list[bytes], vaulted: list[bytes]) -> set[str]:
-    """Hashes referenced by vaulted lines and by no kept line."""
+    """Hashes referenced by vaulted lines and by no kept line.
+
+    Pass the lines already in the vault's archive along with ``vaulted``, so a
+    paste whose move failed after its history line was archived is found again.
+    """
     in_vaulted: set[str] = set()
     for line in vaulted:
         in_vaulted |= paste_hashes(line)
@@ -216,8 +220,22 @@ def expand_roots(paths: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(roots)
 
 
-def plan_sweep(settings: SweepSettings, vault_paths: tuple[str, ...]) -> SweepPlan:
-    """Read the shared files and decide what a sweep would move. Changes nothing."""
+def read_archived_lines(archive_dir: str | None) -> list[bytes]:
+    """History lines already in the vault's archive; [] when it is missing or locked."""
+    if archive_dir is None:
+        return []
+    try:
+        return read_lines(os.path.join(archive_dir, ARCHIVE_HISTORY))
+    except (PermissionError, NotADirectoryError):
+        return []
+
+
+def plan_sweep(settings: SweepSettings, vault_paths: tuple[str, ...], archive_dir: str | None = None) -> SweepPlan:
+    """Read the shared files and decide what a sweep would move. Changes nothing.
+
+    ``archive_dir`` is the vault's sweep archive; its history lines name pastes
+    that earlier, interrupted sweeps did not finish moving.
+    """
     roots = expand_roots(vault_paths)
     stamp = file_stamp(settings.history)
     plan = SweepPlan(history_path=settings.history, history_stamp=stamp)
@@ -227,8 +245,8 @@ def plan_sweep(settings: SweepSettings, vault_paths: tuple[str, ...]) -> SweepPl
         if file_stamp(settings.history) != stamp:
             raise ConcurrentChangeError(settings.history)
         plan.kept, plan.vaulted = split_history(lines, roots)
-        wanted = pastes_to_move(plan.kept, plan.vaulted)
-        plan.pastes = sorted(h for h in wanted if os.path.isfile(os.path.join(settings.paste_cache, f"{h}.txt")))
+    wanted = pastes_to_move(plan.kept, plan.vaulted + read_archived_lines(archive_dir))
+    plan.pastes = sorted(h for h in wanted if os.path.isfile(os.path.join(settings.paste_cache, f"{h}.txt")))
 
     session_ids: set[str] = set()
     for root in vault_paths:
@@ -273,9 +291,9 @@ def _same_content(a: str, b: str) -> bool:
                 return True
 
 
-def move_file(src: str, dst: str) -> str:
-    """Move one file into the vault; an existing different file is kept beside it."""
-    os.makedirs(os.path.dirname(dst), mode=DIR_MODE, exist_ok=True)
+def move_file(src: str, dst: str, root: str) -> str:
+    """Move one file into the vault below ``root``; an existing different file is kept beside it."""
+    ensure_dir_inside(os.path.dirname(dst), root, DIR_MODE)
     if os.path.lexists(dst):
         if _same_content(src, dst):
             os.unlink(src)
@@ -291,21 +309,21 @@ def move_file(src: str, dst: str) -> str:
     return dst
 
 
-def move_tree(src: str, dst: str) -> int:
-    """Move a folder into the vault file by file, merging with what is there."""
+def move_tree(src: str, dst: str, root: str) -> int:
+    """Move a folder into the vault below ``root`` file by file, merging with what is there."""
     moved = 0
     for dirpath, dirnames, filenames in os.walk(src, topdown=True, followlinks=False):
         rel = os.path.relpath(dirpath, src)
         target = dst if rel == "." else os.path.join(dst, rel)
-        os.makedirs(target, mode=DIR_MODE, exist_ok=True)
+        ensure_dir_inside(target, root, DIR_MODE)
         for name in list(dirnames):
             full = os.path.join(dirpath, name)
             if os.path.islink(full):
-                move_file(full, os.path.join(target, name))
+                move_file(full, os.path.join(target, name), root)
                 dirnames.remove(name)
                 moved += 1
         for name in filenames:
-            move_file(os.path.join(dirpath, name), os.path.join(target, name))
+            move_file(os.path.join(dirpath, name), os.path.join(target, name), root)
             moved += 1
     for dirpath, _dirnames, _files in os.walk(src, topdown=False):
         os.rmdir(dirpath)
@@ -322,22 +340,63 @@ def _delete_scratch(path: str, scratch_root: str) -> None:
         os.unlink(path)
 
 
-def _commit_history(path: str, stamp: FileStamp, new_content: bytes, archive_file: str, add: list[bytes]) -> None:
-    """Rewrite history atomically; append ``add`` to the archive just before the rename."""
+def _read_tail(fd: int, offset: int) -> bytes:
+    chunks: list[bytes] = []
+    while chunk := os.pread(fd, 1 << 20, offset):
+        chunks.append(chunk)
+        offset += len(chunk)
+    return b"".join(chunks)
+
+
+def _commit_history(
+    path: str,
+    stamp: FileStamp,
+    new_content: bytes,
+    archive_file: str,
+    add: list[bytes],
+    *,
+    roots: tuple[str, ...],
+) -> int:
+    """Rewrite history atomically and return how many late-appended lines were recovered.
+
+    The stamp is checked before ``add`` goes to the archive and again after,
+    right before the rename (a retry skips lines already archived). Claude Code appends
+    without locking, so a line can still land on the old file between that check
+    and the rename: it is read back from the old file and split again, vaulted
+    lines to the archive and the rest onto the new history.
+    """
     mode = stat.S_IMODE(os.stat(path).st_mode)
     tmp = write_temp_beside(path, new_content, mode)
     committed = False
+    tail = b""
     try:
         if file_stamp(path) != stamp:
             raise ConcurrentChangeError(path)
         if add:
             append_fsync(archive_file, b"".join(add), FILE_MODE)
-        os.replace(tmp, path)
-        committed = True
+        old_fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            st = os.fstat(old_fd)
+            if (st.st_size, st.st_mtime_ns, st.st_ino) != stamp or file_stamp(path) != stamp:
+                raise ConcurrentChangeError(path)
+            os.replace(tmp, path)
+            committed = True
+            fsync_dir(os.path.dirname(path))
+            tail = _read_tail(old_fd, stamp[0])
+        finally:
+            os.close(old_fd)
     finally:
         if not committed and os.path.exists(tmp):
             os.unlink(tmp)
-    fsync_dir(os.path.dirname(path))
+    if not tail:
+        return 0
+    late = split_lines(tail)
+    late_kept, late_vaulted = split_history(late, roots)
+    if late_vaulted:
+        append_fsync(archive_file, b"".join(new_archive_lines(read_lines(archive_file), late_vaulted)), FILE_MODE)
+    if late_kept:
+        append_fsync(path, b"".join(late_kept), mode)
+    return len(late)
 
 
 def read_lines(path: str) -> list[bytes]:
@@ -348,23 +407,48 @@ def read_lines(path: str) -> list[bytes]:
         return []
 
 
-def apply_sweep(plan: SweepPlan, settings: SweepSettings, archive_dir: str) -> dict[str, object]:
-    """Carry out a plan. History goes first: if it changed, nothing else moves."""
+def apply_sweep(
+    plan: SweepPlan, settings: SweepSettings, archive_dir: str, vault_root: str, vault_paths: tuple[str, ...]
+) -> dict[str, object]:
+    """Carry out a plan. History goes first: if it changed, nothing else moves.
+
+    Everything is written below ``archive_dir``, which must sit inside the
+    unlocked ``vault_root`` with no symlink on the way.
+    """
     report = dict(plan.counts())
     if plan.is_empty():
         return report
-    os.makedirs(archive_dir, mode=DIR_MODE, exist_ok=True)
+    ensure_dir_inside(archive_dir, vault_root, DIR_MODE)
+    for name in (ARCHIVE_HISTORY, ARCHIVE_PASTE_CACHE, ARCHIVE_FILE_HISTORY):
+        entry = os.path.join(archive_dir, name)
+        if os.path.islink(entry):
+            raise FinvaultError(
+                f"{entry} is a symlink",
+                "finvault keeps swept data only inside the vault; move it away and run the command again",
+            )
+    archive_file = os.path.join(archive_dir, ARCHIVE_HISTORY)
     if plan.vaulted and plan.history_stamp is not None:
-        archive_file = os.path.join(archive_dir, ARCHIVE_HISTORY)
         add = new_archive_lines(read_lines(archive_file), plan.vaulted)
-        _commit_history(plan.history_path, plan.history_stamp, b"".join(plan.kept), archive_file, add)
+        late = _commit_history(
+            plan.history_path,
+            plan.history_stamp,
+            b"".join(plan.kept),
+            archive_file,
+            add,
+            roots=expand_roots(vault_paths),
+        )
         report["history_lines_archived"] = len(add)
+        report["history_lines_written_meanwhile"] = late
     for h in plan.pastes:
         src = os.path.join(settings.paste_cache, f"{h}.txt")
         if os.path.lexists(src):
-            move_file(src, os.path.join(archive_dir, ARCHIVE_PASTE_CACHE, f"{h}.txt"))
+            move_file(src, os.path.join(archive_dir, ARCHIVE_PASTE_CACHE, f"{h}.txt"), vault_root)
     for sid in plan.file_history:
-        move_tree(os.path.join(settings.file_history, sid), os.path.join(archive_dir, ARCHIVE_FILE_HISTORY, sid))
+        move_tree(
+            os.path.join(settings.file_history, sid),
+            os.path.join(archive_dir, ARCHIVE_FILE_HISTORY, sid),
+            vault_root,
+        )
     for path in plan.scratch:
         if os.path.lexists(path):
             _delete_scratch(path, settings.scratch_root)
@@ -388,7 +472,7 @@ def restore_history(settings: SweepSettings, archive_dir: str) -> dict[str, obje
                 raise ConcurrentChangeError(settings.history)
             os.replace(tmp, settings.history)
         else:
-            _commit_history(settings.history, stamp, b"".join(merged), archive_file, [])
+            _commit_history(settings.history, stamp, b"".join(merged), archive_file, [], roots=())
     pastes_restored = 0
     paste_src = os.path.join(archive_dir, ARCHIVE_PASTE_CACHE)
     for name in _list(paste_src) or []:

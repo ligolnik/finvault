@@ -1,0 +1,3 @@
+# finvault
+
+@AGENTS.md

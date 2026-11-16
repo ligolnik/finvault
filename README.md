@@ -83,7 +83,18 @@ Vaults never share images, checksum lists, archives or passphrases. Locking one 
 
 ## Commands
 
-Every command prints JSON on stdout and diagnostics on stderr.
+Every command prints plain text when stdout is a terminal, and JSON when it is piped or captured
+(scripts and agents). `--json` or `--text` picks one explicitly. Diagnostics always go to stderr.
+
+```console
+$ finvault status
+Vault: 2 folders
+  docs   UNLOCKED, 1 process busy  ~/Documents/Finances
+  notes  locked (mode 000)  ~/Documents/Notes
+Terminals working in the vault:
+  t9 (Work / 1), busy pids 4121
+Waiting to be swept: 3 history lines, 1 paste file
+```
 
 | Command | What it does |
 |---|---|

@@ -134,7 +134,8 @@ class HdiutilIntegrationTest(TempDirTest):
         self.platform.terminals = []
 
         for _ in range(5):
-            vault.lock(cfg, deps)
+            out = vault.lock(cfg, deps)
+            self.assertEqual(out.exit_code, 0, out.data)
             self.assertFalse(os.path.ismount(docs))
             self.assertEqual(os.stat(docs).st_mode & 0o777, 0o000)
             with self.assertRaises(PermissionError):

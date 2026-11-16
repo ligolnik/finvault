@@ -494,19 +494,40 @@ def _open_in_vault(deps: Deps, att: dict[str, Attached]) -> list[Process]:
     return sorted(seen.values(), key=lambda p: p.pid)
 
 
+def _add_counts(total: dict[str, object], more: dict[str, object]) -> dict[str, object]:
+    out = dict(total)
+    for key, value in more.items():
+        prev = out.get(key, 0)
+        if isinstance(value, int) and isinstance(prev, int):
+            out[key] = prev + value
+    return out
+
+
 def _run_sweep(cfg: Config, deps: Deps) -> dict[str, object]:
+    """Sweep, then plan again until nothing is left, so a late write or an
+    interrupted earlier sweep cannot leave traces behind."""
     assert cfg.sweep is not None
     archive_dir = cfg.sweep_archive_dir()
     assert archive_dir is not None
-    for attempt in range(1, SWEEP_ATTEMPTS + 1):
+    vault_root = cfg.folder(cfg.sweep.archive_folder).path
+    total: dict[str, object] | None = None
+    for attempt in range(1, SWEEP_ATTEMPTS + 2):
         try:
-            plan = sw.plan_sweep(cfg.sweep, cfg.vault_paths())
-            return sw.apply_sweep(plan, cfg.sweep, archive_dir)
+            plan = sw.plan_sweep(cfg.sweep, cfg.vault_paths(), archive_dir)
+            if plan.is_empty():
+                return plan.counts() if total is None else total
+            if attempt > SWEEP_ATTEMPTS:
+                break
+            done = sw.apply_sweep(plan, cfg.sweep, archive_dir, vault_root, cfg.vault_paths())
+            total = done if total is None else _add_counts(total, done)
         except ConcurrentChangeError:
-            if attempt == SWEEP_ATTEMPTS:
+            if attempt >= SWEEP_ATTEMPTS:
                 raise
             deps.sleep(SWEEP_RETRY_SEC)
-    raise AssertionError("unreachable")
+    raise FinvaultError(
+        f"vault traces kept appearing after {SWEEP_ATTEMPTS} sweep passes; nothing was closed",
+        "a Claude Code session is still writing about the vault; close it (finvault status), then lock again",
+    )
 
 
 def _require_archive_unlocked(cfg: Config, att: dict[str, Attached]) -> None:
@@ -601,7 +622,7 @@ def status(cfg: Config, deps: Deps) -> Outcome:
     pending: dict[str, object] | None = None
     if cfg.sweep is not None:
         try:
-            pending = sw.plan_sweep(cfg.sweep, cfg.vault_paths()).counts()
+            pending = sw.plan_sweep(cfg.sweep, cfg.vault_paths(), cfg.sweep_archive_dir()).counts()
         except ConcurrentChangeError:
             pending = {"error": "history changed while reading; run status again"}
         if not att and pending.get("history_lines"):
@@ -653,7 +674,7 @@ def sweep(cfg: Config, deps: Deps, *, dry_run: bool) -> Outcome:
     _require_sweep(cfg)
     assert cfg.sweep is not None
     if dry_run:
-        plan = sw.plan_sweep(cfg.sweep, cfg.vault_paths())
+        plan = sw.plan_sweep(cfg.sweep, cfg.vault_paths(), cfg.sweep_archive_dir())
         return Outcome({"dry_run": True, **plan.counts()})
     _require_archive_unlocked(cfg, attached_by_folder(cfg, deps))
     return Outcome({"dry_run": False, **_run_sweep(cfg, deps)})

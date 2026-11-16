@@ -11,7 +11,7 @@ from unittest import mock
 
 from finvault import sweep as sw
 from finvault.config import SweepSettings
-from finvault.errors import ConcurrentChangeError
+from finvault.errors import ConcurrentChangeError, FinvaultError
 from tests.helpers import TempDirTest
 
 VAULT = ("/Users/example/Example/Docs", "/Users/example/.claude/projects/-Users-example-Example-Docs")
@@ -145,7 +145,7 @@ class SweepFilesTest(TempDirTest):
         s, roots, lines = self.build()
         archive = os.path.join(roots[0], ".finvault-sweep")
         mode_before = os.stat(s.history).st_mode
-        sw.apply_sweep(sw.plan_sweep(s, roots), s, archive)
+        sw.apply_sweep(sw.plan_sweep(s, roots), s, archive, roots[0], roots)
         self.assertEqual(Path(s.history).read_bytes(), lines[0] + lines[3] + lines[4])
         self.assertEqual(os.stat(s.history).st_mode, mode_before)
         self.assertEqual(Path(os.path.join(archive, "history.jsonl")).read_bytes(), lines[1] + lines[2])
@@ -161,11 +161,11 @@ class SweepFilesTest(TempDirTest):
     def test_second_sweep_is_a_no_op(self) -> None:
         s, roots, _lines = self.build()
         archive = os.path.join(roots[0], ".finvault-sweep")
-        sw.apply_sweep(sw.plan_sweep(s, roots), s, archive)
+        sw.apply_sweep(sw.plan_sweep(s, roots), s, archive, roots[0], roots)
         archived = Path(os.path.join(archive, "history.jsonl")).read_bytes()
         plan = sw.plan_sweep(s, roots)
         self.assertTrue(plan.is_empty())
-        sw.apply_sweep(plan, s, archive)
+        sw.apply_sweep(plan, s, archive, roots[0], roots)
         self.assertEqual(Path(os.path.join(archive, "history.jsonl")).read_bytes(), archived)
 
     def test_concurrent_write_aborts_with_no_changes(self) -> None:
@@ -175,7 +175,7 @@ class SweepFilesTest(TempDirTest):
         with open(s.history, "ab") as fh:
             fh.write(line("/elsewhere", 999, "written meanwhile"))
         with self.assertRaises(ConcurrentChangeError):
-            sw.apply_sweep(plan, s, archive)
+            sw.apply_sweep(plan, s, archive, roots[0], roots)
         self.assertEqual(Path(s.history).read_bytes(), b"".join(lines) + line("/elsewhere", 999, "written meanwhile"))
         self.assertFalse(os.path.exists(os.path.join(archive, "history.jsonl")))
         self.assertTrue(os.path.exists(os.path.join(s.paste_cache, "vault01.txt")))
@@ -202,17 +202,112 @@ class SweepFilesTest(TempDirTest):
     def test_restore_history_puts_lines_back_in_order(self) -> None:
         s, roots, lines = self.build()
         archive = os.path.join(roots[0], ".finvault-sweep")
-        sw.apply_sweep(sw.plan_sweep(s, roots), s, archive)
+        sw.apply_sweep(sw.plan_sweep(s, roots), s, archive, roots[0], roots)
         report = sw.restore_history(s, archive)
         self.assertEqual(report, {"history_lines_restored": 2, "paste_files_restored": 1})
         restored = Path(s.history).read_bytes()
         self.assertEqual(sorted(sw.split_lines(restored)), sorted(lines))
         self.assertEqual(sw.restore_history(s, archive), {"history_lines_restored": 0, "paste_files_restored": 0})
 
+    def test_line_appended_while_the_archive_is_written_is_not_lost(self) -> None:
+        s, roots, lines = self.build()
+        archive = os.path.join(roots[0], ".finvault-sweep")
+        late = line("/elsewhere", 999, "written meanwhile")
+        real_append = sw.append_fsync
+
+        def append_then_race(path: str, data: bytes, mode: int = 0o600) -> None:
+            real_append(path, data, mode)
+            if path.startswith(archive):
+                with open(s.history, "ab") as fh:
+                    fh.write(late)
+
+        plan = sw.plan_sweep(s, roots, archive)
+        with (
+            mock.patch.object(sw, "append_fsync", side_effect=append_then_race),
+            self.assertRaises(ConcurrentChangeError),
+        ):
+            sw.apply_sweep(plan, s, archive, roots[0], roots)
+        self.assertTrue(Path(s.history).read_bytes().endswith(late))
+        sw.apply_sweep(sw.plan_sweep(s, roots, archive), s, archive, roots[0], roots)
+        self.assertEqual(Path(s.history).read_bytes(), lines[0] + lines[3] + lines[4] + late)
+        self.assertEqual(Path(archive, "history.jsonl").read_bytes(), lines[1] + lines[2])
+
+    def test_lines_appended_to_the_old_file_during_the_rename_are_recovered(self) -> None:
+        s, roots, lines = self.build()
+        archive = os.path.join(roots[0], ".finvault-sweep")
+        late_kept = line("/elsewhere", 998, "other project")
+        late_vaulted = line(roots[0], 999, "vault, written meanwhile")
+        real_replace = os.replace
+
+        def race_then_replace(src: str, dst: str) -> None:
+            if dst == s.history:
+                with open(s.history, "ab") as fh:
+                    fh.write(late_kept + late_vaulted)
+            real_replace(src, dst)
+
+        plan = sw.plan_sweep(s, roots, archive)
+        with mock.patch.object(sw.os, "replace", side_effect=race_then_replace):
+            report = sw.apply_sweep(plan, s, archive, roots[0], roots)
+        self.assertEqual(report["history_lines_written_meanwhile"], 2)
+        self.assertEqual(Path(s.history).read_bytes(), lines[0] + lines[3] + lines[4] + late_kept)
+        self.assertEqual(Path(archive, "history.jsonl").read_bytes(), lines[1] + lines[2] + late_vaulted)
+
+    def test_paste_left_by_a_failed_sweep_is_found_again(self) -> None:
+        s, roots, _lines = self.build()
+        archive = os.path.join(roots[0], ".finvault-sweep")
+        with (
+            mock.patch.object(sw, "move_file", side_effect=OSError(28, "No space left on device")),
+            self.assertRaises(OSError),
+        ):
+            sw.apply_sweep(sw.plan_sweep(s, roots, archive), s, archive, roots[0], roots)
+        self.assertTrue(os.path.exists(os.path.join(s.paste_cache, "vault01.txt")))
+        plan = sw.plan_sweep(s, roots, archive)
+        self.assertEqual(plan.vaulted, [])
+        self.assertEqual(plan.pastes, ["vault01"])
+        sw.apply_sweep(plan, s, archive, roots[0], roots)
+        self.assertFalse(os.path.exists(os.path.join(s.paste_cache, "vault01.txt")))
+        self.assertEqual(Path(archive, "paste-cache", "vault01.txt").read_text(), "vault paste")
+        self.assertTrue(sw.plan_sweep(s, roots, archive).is_empty())
+
+    def test_archive_folder_symlinked_outside_the_vault_is_refused(self) -> None:
+        s, roots, lines = self.build()
+        outside = self.path("outside")
+        os.makedirs(outside)
+        archive = os.path.join(roots[0], ".finvault-sweep")
+        os.symlink(outside, archive)
+        with self.assertRaises(FinvaultError):
+            sw.apply_sweep(sw.plan_sweep(s, roots, archive), s, archive, roots[0], roots)
+        self.assertEqual(os.listdir(outside), [])
+        self.assertEqual(Path(s.history).read_bytes(), b"".join(lines))
+        self.assertTrue(os.path.exists(os.path.join(s.paste_cache, "vault01.txt")))
+
+    def check_symlinked_entry_is_refused(self, entry: str) -> None:
+        s, roots, lines = self.build()
+        outside = self.path("outside")
+        os.makedirs(os.path.join(outside, "dir"))
+        archive = os.path.join(roots[0], ".finvault-sweep")
+        os.makedirs(archive)
+        target = os.path.join(outside, "history.jsonl") if entry == "history.jsonl" else os.path.join(outside, "dir")
+        os.symlink(target, os.path.join(archive, entry))
+        with self.assertRaises(FinvaultError):
+            sw.apply_sweep(sw.plan_sweep(s, roots, archive), s, archive, roots[0], roots)
+        written = [f for _d, _dirs, files in os.walk(outside) for f in files]
+        self.assertEqual(written, [])
+        self.assertEqual(Path(s.history).read_bytes(), b"".join(lines))
+
+    def test_archive_history_symlinked_outside_is_refused(self) -> None:
+        self.check_symlinked_entry_is_refused("history.jsonl")
+
+    def test_archive_paste_cache_symlinked_outside_is_refused(self) -> None:
+        self.check_symlinked_entry_is_refused("paste-cache")
+
+    def test_archive_file_history_symlinked_outside_is_refused(self) -> None:
+        self.check_symlinked_entry_is_refused("file-history")
+
     def test_move_file_keeps_a_differing_existing_copy(self) -> None:
         src = self.write("a/f.txt", "new")
         self.write("b/f.txt", "old")
-        dst = sw.move_file(src, self.path("b", "f.txt"))
+        dst = sw.move_file(src, self.path("b", "f.txt"), self.tmp)
         self.assertEqual(dst, self.path("b", "f.txt.1"))
         self.assertEqual(Path(self.path("b", "f.txt")).read_text(), "old")
         self.assertFalse(os.path.exists(src))

@@ -1,6 +1,6 @@
 [project]
 name = "finvault"
-version = "0.1.12"
+version = "0.1.13"
 description = "Keep folders in encrypted APFS sparse bundles on macOS, unlocked at their own paths"
 readme = "README.md"
 license = "Apache-2.0"

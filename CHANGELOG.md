@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.13 — 2026-11-16
+
+### Added
+
+- Plain-text output for people. Every command prints readable text when stdout is a terminal (`src/finvault/render.py`): folders and their state, busy processes and terminals, what was swept, what failed and what to do next, with paths under your home shown as `~`. When stdout is piped or captured, the JSON is unchanged, so scripts and agents keep working. `--json` and `--text` pick one explicitly, before or after the command.
+- The agent skill now always runs `finvault status --json`, since an agent in a terminal would otherwise get text; `tests/test_skill.py` checks every `status` it names asks for JSON.
+
 ## 0.1.12 — 2026-11-16
 
 ### Fixed

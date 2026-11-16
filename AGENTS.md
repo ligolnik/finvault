@@ -30,10 +30,13 @@ finvault promises, and every change must keep those promises.
   - `sweep.py`: the history sweep; a pure layer on top and the file-system layer below.
   - `platform.py`: hdiutil, lsof, ps, hc and their parsers.
   - `manifest.py`: checksum lists.
+  - `render.py`: the plain-text output.
   - `config.py`, `pathutil.py`, `errors.py`.
 - Decode `hdiutil -plist` output with `plutil -convert json`. Don't import `plistlib` or `xml` at
   module level: some Homebrew Pythons can't load `pyexpat`.
-- Every command prints JSON on stdout and diagnostics on stderr. Exit codes are in `errors.py`.
+- Every command prints JSON on stdout when it is piped, and text from `render.py` on a terminal
+  (`--json`/`--text` choose); diagnostics go to stderr. Exit codes are in `errors.py`.
+- A new output field needs a line in `render.py` and a case in `tests/test_render.py`.
 - State file formats are in `docs/state.md`. Changing one means updating that file.
 
 ## Changes

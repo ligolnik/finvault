@@ -7,7 +7,7 @@ import unittest
 from typing import Any
 from unittest import mock
 
-from finvault.errors import FinvaultError
+from finvault.errors import EXIT_BUSY, FinvaultError
 from finvault.platform import (
     MacPlatform,
     Terminal,
@@ -162,6 +162,14 @@ class PassphraseTransportTest(unittest.TestCase):
         other = subprocess.CompletedProcess(args=[], returncode=1, stdout=b"", stderr=b"hdiutil: no such file")
         with mock.patch("finvault.platform.subprocess.run", return_value=other), self.assertRaises(FinvaultError):
             MacPlatform().check_passphrase("/v/i.sparsebundle", SECRET)
+
+    def test_a_busy_detach_is_reported_as_busy(self) -> None:
+        busy = subprocess.CompletedProcess(
+            args=[], returncode=16, stdout=b"", stderr=b'hdiutil: couldn\'t eject "disk7" - Resource busy'
+        )
+        with mock.patch("finvault.platform.subprocess.run", return_value=busy), self.assertRaises(FinvaultError) as ctx:
+            MacPlatform().detach("/dev/disk7")
+        self.assertEqual(ctx.exception.exit_code, EXIT_BUSY)
 
     def test_empty_passphrase_is_refused_before_running_anything(self) -> None:
         with mock.patch("finvault.platform.subprocess.run") as run, self.assertRaises(FinvaultError):

@@ -15,7 +15,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from finvault.errors import FinvaultError
+from finvault.errors import EXIT_BUSY, FinvaultError
 from finvault.jsonutil import as_dict, as_list
 
 WHOLE_DISK_RE = re.compile(r"^/dev/disk[0-9]+$")
@@ -300,7 +300,15 @@ class MacPlatform:
         self._check(proc, f"unlocking {image}", "check the image path and that the mountpoint is an empty folder")
 
     def detach(self, device: str) -> None:
+        """Close ``device``. A volume still in use fails with exit code ``EXIT_BUSY``."""
         proc = self._run(["hdiutil", "detach", device])
+        err = proc.stderr.decode(errors="replace").strip()
+        if proc.returncode != 0 and "Resource busy" in err:
+            raise FinvaultError(
+                f"closing {device} failed: {err}",
+                "quit programs using the vault, then run finvault lock again",
+                EXIT_BUSY,
+            )
         self._check(proc, f"closing {device}", "quit programs using the vault, then run finvault lock again")
 
     def check_passphrase(self, image: str, passphrase: str) -> bool:

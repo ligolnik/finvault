@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.6 — 2026-11-16
+
+### Fixed
+
+Findings from a second adversarial Codex review, of 0.1.4. Each has a regression test.
+
+- Lines appended during the history rename were lost when the archive was full. They now go back into `history.jsonl` for the next sweep, and the error is still reported.
+- Ctrl-C while `restore-history` wrote its temp file left vault lines in `.history.jsonl.*.tmp` outside the vault. The temp is now removed on any interruption, and the sweep lists a leftover one under `problems` (a killed process can't clean up).
+- A paste or backup with a second hard link kept its contents under the other name after the sweep. Such files are now refused, like a hard-linked `history.jsonl`.
+- `lock` reported success when a backup for a vault session, or a matching scratch folder, was written while the images closed. The check after closing now covers history, backups and scratch, and reports them under `written_while_locking`. `history_lines_written_while_locking` is kept.
+- When an identical copy was already in the archive, the source was deleted even if that copy changed right after the comparison. The copy must now be unchanged, and its folder is synced first.
+- A failed paste restore left a partial file that later runs skipped forever. Pastes are now restored through a temp file and a link, and a paste already there with different content is listed under `paste_files_differing`.
+
+### Not fixed
+
+- A process that can write inside the unlocked vault can swap an archive folder for a symlink mid-move. That needs every file operation rewritten around open folder handles; the README lists it as out of scope.
+
 ## 0.1.5 — 2026-11-16
 
 ### Fixed

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.2 — 2026-11-16
+
+### Fixed
+
+- `lock` listed no terminal when a shell had `cd`'d into the vault after it started, so `--force` could not end it. `hc ls` reports the folder a terminal started in, not where it is now. Each busy pid is now walked up its parent chain (`ps -A -o pid=,ppid=`) to a terminal's program or foreground pid (`hc get <t> --json`). A terminal that only started in the vault and holds nothing there is no longer ended.
+- `lock --force` never ends the terminal `finvault` itself runs in. It is reported with `"self": true`, and the hint says to `cd` out of the vault.
+- `lock` and `status` ask `hc` nothing when no process is busy.
+
 ## 0.1.1 — 2026-11-15
 
 ### Fixed

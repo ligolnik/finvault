@@ -71,8 +71,8 @@ Every command prints JSON on stdout and diagnostics on stderr.
 | `finvault migrate <name>` | Hash every file, copy the folder into its image with `rsync -aE` at a temporary path, check the copy, rename the original to `<path>.plain`, unlock the image at the real path and check again. **Never deletes anything.** |
 | `finvault archive` | Build a read-only, encrypted, compressed image of every `.plain` folder in `<state_dir>/archive/`, then check it. |
 | `finvault unlock` | Ask for the passphrase once, set each mountpoint from 000 back to 700, and unlock every image at its path. Refuses a mountpoint that holds files. |
-| `finvault lock [--force] [--skip-sweep]` | Refuse while any process has files open in the vault (`lsof`), listing the `hc` terminals working there. `--force` ends those terminals with `hc kill`. Then sweep, close every image, and set each mountpoint to mode 000. |
-| `finvault status` | Which images are unlocked, busy processes, `hc` terminals in the vault, and how much is waiting to be swept. |
+| `finvault lock [--force] [--skip-sweep]` | Refuse while any process has files open in the vault (`lsof`), listing the `hc` terminals those processes run under. A terminal is matched by process ancestry (each busy pid's parents up to a terminal's pid or foreground pid from `hc get`), never by the folder it started in. `--force` ends those terminals with `hc kill`, except the one `finvault` itself runs in (`"self": true`). Then sweep, close every image, and set each mountpoint to mode 000. |
+| `finvault status` | Which images are unlocked, busy processes, the `hc` terminals they run under, and how much is waiting to be swept. |
 | `finvault verify` | Check each unlocked image against the checksum list saved inside it at migration. |
 | `finvault sweep [--dry-run]` | Run the sweep by itself (needs the sweep archive folder unlocked unless `--dry-run`). |
 | `finvault restore-history` | Merge the swept history lines back into `history.jsonl` in timestamp order, and copy back missing paste files. |

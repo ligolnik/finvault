@@ -142,3 +142,7 @@ scripts/check.sh     # ruff, ruff format, pyright, shellcheck, tests: the same g
 - `tests/test_hdiutil_integration.py` creates, attaches and detaches real throwaway encrypted images in a temp folder. It runs on macOS, including CI's macOS runner. Set `FINVAULT_SKIP_HDIUTIL=1` to skip it.
 - State file formats are in `docs/state.md`.
 - For secret scanning before commits: `pip install pre-commit && pre-commit install`.
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).

@@ -173,8 +173,8 @@ The archive folder must be a real folder inside the unlocked image: the sweep re
 ## Agent skill
 
 [The finvault skill](skills/finvault/SKILL.md) helps an AI agent working on a Mac
-with a vault recognise locked folders, explain status, and leave unlocking and
-locking to the human. It is for vault users, not finvault development.
+with a vault recognise locked folders, explain status, leave unlocking and
+locking to the human, and ask the human whether to lock once its vault work is done. It is for vault users, not finvault development.
 
 To install it yourself, run the appropriate commands from this repository:
 

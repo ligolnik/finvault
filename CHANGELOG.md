@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.11 — 2026-11-16
+
+### Added
+
+- Agent skill Step 7, "Finish work that used the vault". When an agent finishes work that read or wrote a vault folder, it leaves the vault and closes what it owns (as in Step 4), runs `finvault status`, and ends its reply by asking the human whether the vault should be locked now. It names any busy terminals, which would make `lock` refuse or be ended by `--force`. The human runs `finvault lock`; the agent never does, and never phrases the question as an offer. The router preamble names this as the one required chain. `tests/test_skill.py` now checks the chain points at that step, that the step asks rather than offers, and that every `finvault` command other than `status` appears only as the human's to run or in a never-rule.
+
 ## 0.1.10 — 2026-11-16
 
 ### Added

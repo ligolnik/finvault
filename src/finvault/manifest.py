@@ -76,6 +76,21 @@ class Manifest:
     def file_count(self) -> int:
         return len(self.files) + len(self.symlinks)
 
+    def without(self, top_names: frozenset[str]) -> Manifest:
+        """A copy without entries under the given top-level names."""
+        if not top_names:
+            return self
+
+        def keep(rel: str) -> bool:
+            return rel.split(os.sep, 1)[0] not in top_names
+
+        return Manifest(
+            files={r: v for r, v in self.files.items() if keep(r)},
+            symlinks={r: v for r, v in self.symlinks.items() if keep(r)},
+            dirs=[d for d in self.dirs if keep(d)],
+            special=[x for x in self.special if keep(x)],
+        )
+
 
 def sha256_file(path: str) -> str:
     h = hashlib.sha256()

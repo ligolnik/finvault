@@ -124,6 +124,16 @@ class InitMigrateTest(VaultTestBase):
         self.assertFalse(os.path.exists(cfg.folder("docs").path + ".plain"))
         self.assertEqual(platform.mounts, {})
 
+    def test_migrate_refuses_a_folder_that_already_has_the_sweep_archive_name(self) -> None:
+        cfg = self.vault_config()
+        deps = fake_deps(FakePlatform())
+        self.write("work-a/Docs/.finvault-sweep/mine.txt", "user data")
+        vault.init(cfg, deps, "docs")
+        with self.assertRaises(FinvaultError) as ctx:
+            vault.migrate(cfg, deps, "docs")
+        self.assertIn("archive_subdir", ctx.exception.message)
+        self.assertFalse(os.path.exists(cfg.folder("docs").path + ".plain"))
+
     def test_migrate_never_deletes_the_source(self) -> None:
         cfg, _platform, _deps = self.setup_vault()
         for f in cfg.folders:
@@ -258,6 +268,22 @@ class LockUnlockTest(VaultTestBase):
         vault.unlock(cfg, deps)
         archived = Path(docs, ".finvault-sweep", "history.jsonl").read_text()
         self.assertIn('"timestamp": 1', archived)
+
+    def test_verify_ignores_the_sweep_archive_written_after_migrate(self) -> None:
+        cfg, _platform, deps = self.setup_vault()
+        docs = cfg.folder("docs").path
+        entry: dict[str, object] = {
+            "display": "x",
+            "pastedContents": {},
+            "timestamp": 1,
+            "project": docs,
+            "sessionId": "s",
+        }
+        self.write("claude/history.jsonl", json.dumps(entry) + "\n")
+        vault.lock(cfg, deps)
+        vault.unlock(cfg, deps)
+        self.assertTrue(os.path.isdir(os.path.join(docs, ".finvault-sweep")))
+        self.assertEqual(vault.verify(cfg, deps).exit_code, 0)
 
     def test_status_and_verify(self) -> None:
         cfg, _platform, deps = self.setup_vault()

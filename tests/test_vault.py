@@ -8,6 +8,7 @@ import os
 import stat
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import replace
 from pathlib import Path
 
 from finvault import cli, vault
@@ -204,6 +205,23 @@ class LockUnlockTest(VaultTestBase):
         self.assertEqual(platform.mounts, {})
         for f in cfg.folders:
             self.assertEqual(mode(f.path), 0o000)
+
+    def test_cancelled_passphrase_prompt_leaves_mountpoints_locked(self) -> None:
+        cfg, platform, deps = self.setup_vault()
+        vault.lock(cfg, deps)
+
+        def no_passphrase() -> str:
+            raise FinvaultError("no passphrase entered")
+
+        def interrupted() -> str:
+            raise KeyboardInterrupt
+
+        for prompt in (no_passphrase, interrupted):
+            with self.subTest(prompt=prompt.__name__), self.assertRaises((FinvaultError, KeyboardInterrupt)):
+                vault.unlock(cfg, replace(deps, ask_passphrase=prompt))
+            self.assertEqual(platform.mounts, {})
+            for f in cfg.folders:
+                self.assertEqual(mode(f.path), 0o000)
 
     def test_unlock_refuses_a_folder_that_still_has_plain_files(self) -> None:
         cfg = self.vault_config()

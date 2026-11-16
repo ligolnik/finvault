@@ -428,19 +428,23 @@ def unlock(cfg: Config, deps: Deps) -> Outcome:
             ready.append(f)
     unlocked: list[str] = []
     if ready:
-        pw = deps.ask_passphrase()
-        for i, f in enumerate(ready):
-            try:
-                deps.platform.attach(cfg.image_path(f), f.path, pw)
-            except FinvaultError as exc:
-                os.chmod(f.path, LOCKED_MODE)
-                if i == 0 and "wrong passphrase" in exc.message:
-                    for rest in ready[1:]:
-                        os.chmod(rest.path, LOCKED_MODE)
-                    raise
-                failed.append({"name": f.name, "reason": str(exc)})
-                continue
-            unlocked.append(f.name)
+        try:
+            pw = deps.ask_passphrase()
+            for i, f in enumerate(ready):
+                try:
+                    deps.platform.attach(cfg.image_path(f), f.path, pw)
+                except FinvaultError as exc:
+                    if i == 0 and "wrong passphrase" in exc.message:
+                        raise
+                    failed.append({"name": f.name, "reason": str(exc)})
+                    continue
+                unlocked.append(f.name)
+        finally:
+            # A cancelled prompt, a wrong passphrase or a failed attach must not
+            # leave a writable plain folder where the vault belongs.
+            for f in ready:
+                if f.name not in unlocked:
+                    os.chmod(f.path, LOCKED_MODE)
         now_att = attached_by_folder(cfg, deps)
         for name in list(unlocked):
             f = cfg.folder(name)

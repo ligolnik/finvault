@@ -14,10 +14,11 @@ import subprocess
 import sys
 import time
 import unittest
+from collections.abc import Sequence
 from pathlib import Path
 
 from finvault import vault
-from finvault.config import Config
+from finvault.config import Config, Folder
 from finvault.errors import EXIT_BUSY, FinvaultError
 from finvault.platform import MacPlatform, Terminal
 from tests.helpers import TempDirTest, fake_deps, make_config
@@ -27,6 +28,20 @@ def _spotlight_processes() -> list[str]:
     """Spotlight processes running now, for the failure message (ps lists other users' processes)."""
     ps = subprocess.run(["ps", "-axo", "pid=,user=,comm="], capture_output=True, text=True, check=False)
     return [row.strip() for row in ps.stdout.splitlines() if "/md" in row or " md" in row]
+
+
+def _root_holders(folders: Sequence[Folder]) -> list[str]:
+    """Who holds each folder's volume, seen as root: CI runners allow sudo without a password.
+
+    ``sudo -n`` never prompts, so on a Mac that wants a password this returns a note instead.
+    """
+    out: list[str] = []
+    for f in folders:
+        proc = subprocess.run(
+            ["sudo", "-n", "lsof", "-w", "-n", "-P", "--", f.path], capture_output=True, text=True, check=False
+        )
+        out.append(f"{f.name}: exit {proc.returncode}: {(proc.stdout or proc.stderr).strip()[:2000]}")
+    return out
 
 
 def _skip_reason() -> str:
@@ -141,7 +156,15 @@ class HdiutilIntegrationTest(TempDirTest):
 
         for cycle in range(5):
             out = vault.lock(cfg, deps)
-            self.assertEqual(out.exit_code, 0, {"cycle": cycle, "lock": out.data, "spotlight": _spotlight_processes()})
+            if out.exit_code != 0:
+                self.fail(
+                    {
+                        "cycle": cycle,
+                        "lock": out.data,
+                        "spotlight": _spotlight_processes(),
+                        "holders_as_root": _root_holders(cfg.folders),
+                    }
+                )
             self.assertFalse(os.path.ismount(docs))
             self.assertEqual(os.stat(docs).st_mode & 0o777, 0o000)
             with self.assertRaises(PermissionError):

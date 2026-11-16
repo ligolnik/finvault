@@ -40,10 +40,22 @@ class Process:
 
 @dataclass(frozen=True)
 class Terminal:
+    """A live local hc terminal. ``pids`` are its program's pid and its foreground pid."""
+
     address: str
     cwd: str
     agent: str = ""
     where: str = ""
+    pids: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class BusyTerminal:
+    """A terminal some busy processes descend from. ``is_self`` marks finvault's own."""
+
+    terminal: Terminal
+    busy_pids: tuple[int, ...]
+    is_self: bool = False
 
 
 class Platform(Protocol):
@@ -57,6 +69,7 @@ class Platform(Protocol):
     def open_files(self, path: str, *, recursive: bool = False) -> list[Process]: ...
     def hc_terminals(self) -> list[Terminal] | None: ...
     def hc_kill(self, address: str) -> None: ...
+    def process_parents(self) -> dict[int, int]: ...
 
 
 # ------------------------------------------------------------------- parsers
@@ -136,6 +149,76 @@ def parse_hc_ls(data: object) -> list[Terminal]:
             continue
         out.append(Terminal(address=address, cwd=cwd, agent=str(t.get("agent", "")), where=str(t.get("where", ""))))
     return out
+
+
+def _pid(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def parse_hc_get(data: object) -> tuple[tuple[int, ...], str | None]:
+    """(pids, current cwd) from ``hc get <t> --json``: the program's pid and the
+    foreground process's pid, and the foreground process's working folder."""
+    table = as_dict(data)
+    if table is None:
+        return (), None
+    pids: list[int] = []
+    fg = as_dict(table.get("foreground"))
+    cwd: str | None = None
+    for value in (table.get("pid"), fg.get("pid") if fg else None):
+        pid = _pid(value)
+        if pid is not None and pid not in pids:
+            pids.append(pid)
+    if fg is not None and isinstance(fg.get("cwd"), str) and fg.get("cwd"):
+        cwd = str(fg.get("cwd"))
+    return tuple(pids), cwd
+
+
+def parse_ps(text: str) -> dict[int, int]:
+    """pid -> parent pid from ``ps -A -o pid=,ppid=``."""
+    parents: dict[int, int] = {}
+    for row in text.splitlines():
+        parts = row.split()
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            parents[int(parts[0])] = int(parts[1])
+    return parents
+
+
+def owning_terminal(pid: int, parents: dict[int, int], by_pid: dict[int, Terminal]) -> Terminal | None:
+    """Walk ``pid``'s parents up to the first terminal pid; None when no terminal owns it."""
+    seen: set[int] = set()
+    cur = pid
+    while cur > 1 and cur not in seen:
+        if cur in by_pid:
+            return by_pid[cur]
+        seen.add(cur)
+        cur = parents.get(cur, 0)
+    return None
+
+
+def match_terminals(
+    busy_pids: Sequence[int], parents: dict[int, int], terminals: Sequence[Terminal], self_pid: int
+) -> list[BusyTerminal]:
+    """The terminals the busy processes descend from, in hc ls order.
+
+    hc reports the folder a terminal started in, not where it is now, so this
+    goes by process ancestry, never by cwd. The terminal finvault itself runs in
+    is marked ``is_self`` so it is never ended.
+    """
+    by_pid: dict[int, Terminal] = {}
+    for t in terminals:
+        for pid in t.pids:
+            by_pid.setdefault(pid, t)
+    owned: dict[str, list[int]] = {}
+    for pid in busy_pids:
+        t = owning_terminal(pid, parents, by_pid)
+        if t is not None:
+            owned.setdefault(t.address, []).append(pid)
+    own = owning_terminal(self_pid, parents, by_pid)
+    return [
+        BusyTerminal(t, tuple(owned[t.address]), own is not None and own.address == t.address)
+        for t in terminals
+        if t.address in owned
+    ]
 
 
 def size_mb(nbytes: int) -> int:
@@ -248,10 +331,29 @@ class MacPlatform:
             print(f"warning: hc ls failed: {proc.stderr.decode(errors='replace').strip()}", file=sys.stderr)
             return None
         try:
-            return parse_hc_ls(json.loads(proc.stdout))
+            terms = parse_hc_ls(json.loads(proc.stdout))
         except json.JSONDecodeError:
             print("warning: hc ls --json printed something other than JSON", file=sys.stderr)
             return None
+        return [self._with_pids(t) for t in terms]
+
+    def _with_pids(self, t: Terminal) -> Terminal:
+        """Add pids (and the current folder) from ``hc get``; hc ls has neither."""
+        proc = subprocess.run([self.hc_command, "get", t.address, "--json"], capture_output=True, check=False)
+        if proc.returncode != 0:
+            print(f"warning: hc get {t.address} failed; it may have just ended", file=sys.stderr)
+            return t
+        try:
+            pids, cwd = parse_hc_get(json.loads(proc.stdout))
+        except json.JSONDecodeError:
+            print(f"warning: hc get {t.address} --json printed something other than JSON", file=sys.stderr)
+            return t
+        return Terminal(t.address, cwd or t.cwd, t.agent, t.where, pids)
+
+    def process_parents(self) -> dict[int, int]:
+        proc = self._run(["ps", "-A", "-o", "pid=,ppid="])
+        self._check(proc, "ps", "run ps -A by hand to see why")
+        return parse_ps(proc.stdout.decode(errors="replace"))
 
     def hc_kill(self, address: str) -> None:
         proc = self._run([self.hc_command, "kill", address])

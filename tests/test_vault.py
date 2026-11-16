@@ -170,18 +170,33 @@ class LockUnlockTest(VaultTestBase):
         again = vault.lock(cfg, deps)
         self.assertEqual(again.data["already_locked"], ["docs", "notes"])
 
-    def test_lock_refuses_when_busy_and_lists_terminals(self) -> None:
+    def test_lock_finds_busy_terminals_by_process_ancestry_not_cwd(self) -> None:
         cfg, platform, deps = self.setup_vault()
         docs = cfg.folder("docs").path
-        platform.busy[os.path.realpath(docs)] = [Process(77, "claude", [docs + "/report.txt"])]
+        # t1 started elsewhere and cd'd into the vault: its zsh (500) runs vim (77).
+        # t2 started in the vault but holds nothing there now.
+        platform.busy[os.path.realpath(docs)] = [Process(500, "zsh", [docs]), Process(77, "vim", [docs + "/x"])]
+        platform.parents = {77: 500, 500: 400, 400: 1, 600: 400}
         platform.terminals = [
-            Terminal("t1", docs + "/sub", "claude-code", "Work / agent"),
-            Terminal("t2", self.path("elsewhere"), "zsh", "Other"),
+            Terminal("t2", docs, "zsh", "Other", pids=(600,)),
+            Terminal("t1", self.path("elsewhere"), "zsh", "Work / shell", pids=(400, 500)),
         ]
         with self.assertRaises(FinvaultError) as ctx:
             vault.lock(cfg, deps)
         self.assertEqual(ctx.exception.exit_code, EXIT_BUSY)
-        self.assertEqual([t["address"] for t in ctx.exception.details["terminals"]], ["t1"])  # type: ignore[index, union-attr]
+        terms = ctx.exception.details["terminals"]
+        self.assertEqual(
+            terms,
+            [
+                {
+                    "address": "t1",
+                    "cwd": self.path("elsewhere"),
+                    "where": "Work / shell",
+                    "busy_pids": [77, 500],
+                    "self": False,
+                }
+            ],
+        )
         self.assertEqual(platform.killed, [])
         self.assertEqual(set(platform.mounts), {os.path.realpath(cfg.image_path(f)) for f in cfg.folders})
 
@@ -189,7 +204,11 @@ class LockUnlockTest(VaultTestBase):
         cfg, platform, deps = self.setup_vault()
         docs = cfg.folder("docs").path
         platform.busy[os.path.realpath(docs)] = [Process(77, "claude", [docs])]
-        platform.terminals = [Terminal("t1", docs, "claude-code"), Terminal("t2", self.path("elsewhere"), "zsh")]
+        platform.parents = {77: 70, 70: 1, 80: 1}
+        platform.terminals = [
+            Terminal("t2", docs, "zsh", pids=(80,)),
+            Terminal("t1", self.path("elsewhere"), "claude-code", pids=(70,)),
+        ]
         out = vault.lock(cfg, deps, force=True)
         self.assertEqual(platform.killed, ["t1"])
         self.assertEqual(out.data["killed"], ["t1"])
@@ -199,13 +218,35 @@ class LockUnlockTest(VaultTestBase):
         cfg, platform, deps = self.setup_vault()
         docs = cfg.folder("docs").path
         platform.busy[os.path.realpath(docs)] = [Process(88, "Preview", [docs])]
-        platform.terminals = [Terminal("t1", docs)]
+        platform.parents = {88: 1, 70: 1}
+        platform.terminals = [Terminal("t1", docs, pids=(70,))]
         platform.kill_clears = False
         with self.assertRaises(FinvaultError) as ctx:
             vault.lock(cfg, deps, force=True)
         self.assertEqual(ctx.exception.exit_code, EXIT_BUSY)
-        self.assertEqual(platform.killed, ["t1"])
+        self.assertEqual(platform.killed, [])
+        self.assertEqual(ctx.exception.details["terminals"], [])
         self.assertNotEqual(platform.mounts, {})
+
+    def test_force_never_ends_the_terminal_finvault_runs_in(self) -> None:
+        cfg, platform, deps = self.setup_vault()
+        docs = cfg.folder("docs").path
+        platform.busy[os.path.realpath(docs)] = [Process(70, "zsh", [docs])]
+        platform.parents = {os.getpid(): 70, 70: 1}
+        platform.terminals = [Terminal("t1", docs, pids=(70,))]
+        platform.kill_clears = False
+        with self.assertRaises(FinvaultError) as ctx:
+            vault.lock(cfg, deps, force=True)
+        self.assertEqual(platform.killed, [])
+        self.assertIn("cd out of the vault", ctx.exception.hint)
+        self.assertTrue(ctx.exception.details["terminals"][0]["self"])  # type: ignore[index]
+
+    def test_lock_asks_hc_nothing_when_nothing_is_busy(self) -> None:
+        cfg, platform, deps = self.setup_vault()
+        platform.terminals = None  # hc missing would make this None; idle lock must not need it
+        out = vault.lock(cfg, deps)
+        self.assertEqual(out.data["terminals"], [])
+        self.assertEqual(platform.mounts, {})
 
     def test_wrong_passphrase_unlocks_nothing_and_relocks_mountpoints(self) -> None:
         cfg, platform, deps = self.setup_vault()

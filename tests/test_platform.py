@@ -8,7 +8,17 @@ from typing import Any
 from unittest import mock
 
 from finvault.errors import FinvaultError
-from finvault.platform import MacPlatform, parse_hc_ls, parse_hdiutil_info, parse_lsof, size_mb
+from finvault.platform import (
+    MacPlatform,
+    Terminal,
+    match_terminals,
+    parse_hc_get,
+    parse_hc_ls,
+    parse_hdiutil_info,
+    parse_lsof,
+    parse_ps,
+    size_mb,
+)
 
 SECRET = "pass phrase that must stay off argv"
 
@@ -64,6 +74,29 @@ class ParserTest(unittest.TestCase):
         terms = parse_hc_ls(data)
         self.assertEqual([t.address for t in terms], ["t1"])
         self.assertEqual(parse_hc_ls("nonsense"), [])
+
+    def test_hc_get_gives_program_and_foreground_pids_and_current_cwd(self) -> None:
+        data = {"address": "t1", "pid": 500, "cwd": "/start", "foreground": {"pid": 77, "cwd": "/work/Docs"}}
+        self.assertEqual(parse_hc_get(data), ((500, 77), "/work/Docs"))
+        self.assertEqual(parse_hc_get({"pid": 500, "foreground": {"pid": 500}}), ((500,), None))
+        self.assertEqual(parse_hc_get({"pid": True, "foreground": None}), ((), None))
+        self.assertEqual(parse_hc_get("nonsense"), ((), None))
+
+    def test_ps_rows_map_pid_to_parent(self) -> None:
+        self.assertEqual(parse_ps("    1     0\n  500     1\n   77   500\nPID PPID\n\n"), {1: 0, 500: 1, 77: 500})
+
+    def test_busy_pids_map_to_the_nearest_terminal_ancestor(self) -> None:
+        parents = {77: 60, 60: 500, 500: 1, 88: 1, 900: 901, 901: 900, 42: 10, 10: 1}
+        terms = [
+            Terminal("t2", "/x", pids=(10,)),
+            Terminal("t1", "/start", pids=(400, 500)),
+            Terminal("t3", "/y", pids=(60,)),
+        ]
+        got = match_terminals([77, 88, 900, 500, 42], parents, terms, self_pid=42)
+        self.assertEqual(
+            [(b.terminal.address, b.busy_pids, b.is_self) for b in got],
+            [("t2", (42,), True), ("t1", (500,), False), ("t3", (77,), False)],
+        )
 
     def test_size_mb_rounds_up(self) -> None:
         self.assertEqual(size_mb(0), 1)

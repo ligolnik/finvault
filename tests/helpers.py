@@ -61,6 +61,7 @@ class FakePlatform:
         self.devices: dict[str, str] = {}
         self.busy: dict[str, list[Process]] = {}
         self.terminals: list[Terminal] | None = []
+        self.parents: dict[int, int] = {}  # faked process table: pid -> parent pid
         self.killed: list[str] = []
         self.kill_clears: bool = True
         self.calls: list[tuple[str, ...]] = []
@@ -149,6 +150,9 @@ class FakePlatform:
 
     def hc_terminals(self) -> list[Terminal] | None:
         return None if self.terminals is None else list(self.terminals)
+
+    def process_parents(self) -> dict[int, int]:
+        return dict(self.parents)
 
     def hc_kill(self, address: str) -> None:
         self.killed.append(address)

@@ -7,9 +7,12 @@ fake and never called. Skipped off macOS, or when FINVAULT_SKIP_HDIUTIL=1.
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -99,19 +102,32 @@ class HdiutilIntegrationTest(TempDirTest):
         vault.migrate(cfg, deps, "notes")
         self.assertEqual(vault.verify(cfg, deps).exit_code, 0)
 
-        # lock refuses while another process works in the vault, and names the terminal
-        self.platform.terminals = [Terminal("t9", docs)]
-        holder = subprocess.Popen(["/bin/sleep", "120"], cwd=docs)
+        # lock refuses while another process works in the vault, and names the terminal it
+        # runs under: a shell (the "terminal", started elsewhere) whose child sits in the vault.
+        holder = subprocess.Popen(
+            ["/bin/sh", "-c", f"cd {shlex.quote(docs)} && /bin/sleep 120 & wait"],
+            cwd=self.tmp,
+            start_new_session=True,
+        )
+        self.platform.terminals = [Terminal("t9", self.tmp, pids=(holder.pid,))]
         try:
+            for _ in range(100):
+                if self.platform.open_files(docs):
+                    break
+                time.sleep(0.05)
             with self.assertRaises(FinvaultError) as ctx:
                 vault.lock(cfg, deps)
             self.assertEqual(ctx.exception.exit_code, EXIT_BUSY)
-            self.assertIn(holder.pid, [p["pid"] for p in ctx.exception.details["busy"]])  # type: ignore[union-attr]
-            self.assertEqual([t["address"] for t in ctx.exception.details["terminals"]], ["t9"])  # type: ignore[union-attr]
+            terms = ctx.exception.details["terminals"]
+            self.assertEqual([(t["address"], t["self"]) for t in terms], [("t9", False)])  # type: ignore[union-attr, index]
             self.assertTrue(os.path.ismount(docs))
         finally:
-            holder.kill()
+            os.killpg(holder.pid, signal.SIGKILL)
             holder.wait()
+            for _ in range(100):
+                if not self.platform.open_files(docs):
+                    break
+                time.sleep(0.05)
         self.platform.terminals = []
 
         for _ in range(5):

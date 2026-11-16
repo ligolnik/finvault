@@ -393,6 +393,108 @@ class SweepFilesTest(TempDirTest):
     def test_archive_file_history_symlinked_outside_is_refused(self) -> None:
         self.check_symlinked_entry_is_refused("file-history")
 
+    def test_hard_linked_paste_is_refused(self) -> None:
+        s, roots, _lines = self.build()
+        os.link(os.path.join(s.paste_cache, "vault01.txt"), self.path("plaintext-alias"))
+        archive = os.path.join(roots[0], ".finvault-sweep")
+        plan = sw.plan_sweep(s, roots, archive)
+        self.assertFalse(plan.is_complete())
+        self.assertIn("hard links", plan.problems[0])
+        with self.assertRaises(FinvaultError):
+            sw.move_file(os.path.join(s.paste_cache, "vault01.txt"), self.path("v", "p.txt"), self.tmp)
+        self.assertTrue(os.path.exists(os.path.join(s.paste_cache, "vault01.txt")))
+
+    def test_hard_linked_backup_is_refused(self) -> None:
+        s, roots, _lines = self.build()
+        os.link(os.path.join(s.file_history, "sess-a", "abc@v1"), self.path("backup-alias"))
+        plan = sw.plan_sweep(s, roots, os.path.join(roots[0], ".finvault-sweep"))
+        self.assertFalse(plan.is_complete())
+        self.assertIn("abc@v1", plan.problems[0])
+
+    def test_late_vaulted_line_goes_back_to_history_when_the_archive_is_full(self) -> None:
+        s, roots, _lines = self.build()
+        archive = os.path.join(roots[0], ".finvault-sweep")
+        late = line(roots[0], 999, "UNIQUE LATE SECRET")
+        real_replace, real_append = os.replace, sw.append_fsync
+
+        def race_then_replace(src: str, dst: str) -> None:
+            if dst == s.history:
+                with open(s.history, "ab") as fh:
+                    fh.write(late)
+            real_replace(src, dst)
+
+        def archive_full(path: str, data: bytes, mode: int = 0o600) -> None:
+            if b"UNIQUE LATE SECRET" in data and path.startswith(archive):
+                real_append(path, data[:19], mode)
+                raise OSError(28, "No space left on device")
+            real_append(path, data, mode)
+
+        with (
+            mock.patch.object(sw.os, "replace", side_effect=race_then_replace),
+            mock.patch.object(sw, "append_fsync", side_effect=archive_full),
+            self.assertRaises(OSError),
+        ):
+            sw.apply_sweep(sw.plan_sweep(s, roots, archive), s, archive, roots[0], roots)
+        self.assertIn(late, sw.read_lines(s.history))
+        sw.apply_sweep(sw.plan_sweep(s, roots, archive), s, archive, roots[0], roots)
+        self.assertNotIn(late, sw.read_lines(s.history))
+        self.assertIn(late, sw.read_lines(os.path.join(archive, "history.jsonl")))
+
+    def test_interrupted_restore_leaves_no_temp_file(self) -> None:
+        s, roots, _lines = self.build()
+        archive = os.path.join(roots[0], ".finvault-sweep")
+        sw.apply_sweep(sw.plan_sweep(s, roots, archive), s, archive, roots[0], roots)
+        with (
+            mock.patch("finvault.pathutil.os.fsync", side_effect=KeyboardInterrupt),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            sw.restore_history(s, archive)
+        self.assertEqual(list(Path(s.history).parent.glob(".history.jsonl.*.tmp")), [])
+
+    def test_a_leftover_rewrite_temp_makes_the_plan_incomplete(self) -> None:
+        s, roots, _lines = self.build()
+        leftover = self.write("claude/.history.jsonl.abc123.tmp", line(roots[0], 1, "secret"))
+        plan = sw.plan_sweep(s, roots)
+        self.assertFalse(plan.is_complete())
+        self.assertIn(leftover, plan.problems[0])
+
+    def test_restore_retries_a_paste_and_reports_one_that_differs(self) -> None:
+        s, roots, _lines = self.build()
+        archive = os.path.join(roots[0], ".finvault-sweep")
+        sw.apply_sweep(sw.plan_sweep(s, roots, archive), s, archive, roots[0], roots)
+        real_copy = sw.shutil.copyfileobj
+
+        def full(fsrc: BinaryIO, fdst: BinaryIO, length: int = 0) -> None:
+            fdst.write(fsrc.read(3))
+            raise OSError(28, "No space left on device")
+
+        with mock.patch.object(sw.shutil, "copyfileobj", side_effect=full), self.assertRaises(OSError):
+            sw.restore_history(s, archive)
+        self.assertFalse(os.path.exists(os.path.join(s.paste_cache, "vault01.txt")))
+        self.assertIs(sw.shutil.copyfileobj, real_copy)
+        self.assertEqual(sw.restore_history(s, archive)["paste_files_restored"], 1)
+        self.assertEqual(Path(s.paste_cache, "vault01.txt").read_text(), "vault paste")
+        Path(s.paste_cache, "vault01.txt").write_text("vau")
+        report = sw.restore_history(s, archive)
+        self.assertEqual(report["paste_files_differing"], [os.path.join(s.paste_cache, "vault01.txt")])
+
+    def test_move_file_keeps_the_source_when_the_existing_copy_changes(self) -> None:
+        src = self.write("source", "ONLY ORIGINAL")
+        dst = self.write("vault/dest", "ONLY ORIGINAL")
+        real_compare = sw._same_content  # pyright: ignore[reportPrivateUsage] -- inject a change after the compare
+
+        def compare_then_change(a: str, b: str) -> bool:
+            same = real_compare(a, b)
+            Path(b).write_text("replacement")
+            return same
+
+        with (
+            mock.patch.object(sw, "_same_content", side_effect=compare_then_change),
+            self.assertRaises(ConcurrentChangeError),
+        ):
+            sw.move_file(src, dst, self.path("vault"))
+        self.assertEqual(Path(src).read_text(), "ONLY ORIGINAL")
+
     def test_move_file_keeps_a_differing_existing_copy(self) -> None:
         src = self.write("a/f.txt", "new")
         self.write("b/f.txt", "old")

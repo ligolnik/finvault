@@ -43,18 +43,23 @@ def fsync_dir(path: str) -> None:
 
 
 def write_temp_beside(path: str, data: bytes, mode: int) -> str:
-    """Write ``data`` to a fsynced temp file in ``path``'s folder and return its name."""
+    """Write ``data`` to a fsynced temp file in ``path``'s folder and return its name.
+
+    The temp may hold vault lines, so it is removed on any failure, Ctrl-C included.
+    """
     folder = os.path.dirname(path) or "."
     fd, tmp = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.", suffix=".tmp", dir=folder)
+    written = False
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
             fh.flush()
             os.fchmod(fh.fileno(), mode)
             os.fsync(fh.fileno())
-    except OSError:
-        os.unlink(tmp)
-        raise
+        written = True
+    finally:
+        if not written:
+            os.unlink(tmp)
     return tmp
 
 

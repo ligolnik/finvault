@@ -67,6 +67,37 @@ def append_fsync(path: str, data: bytes, mode: int = 0o600) -> None:
         os.fsync(fh.fileno())
 
 
+def trim_partial_line(path: str) -> int:
+    """Cut a last line that lacks its newline and return how many bytes were cut.
+
+    Every append finvault makes ends in a newline, so an unterminated tail is
+    the remains of an append that failed part way (a full disk, a crash). Its
+    full line is still at its source and is appended again on the retry.
+    """
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return 0
+    try:
+        size = os.fstat(fd).st_size
+        if size == 0 or os.pread(fd, 1, size - 1) == b"\n":
+            return 0
+        keep = 0
+        end = size
+        while end > 0:
+            start = max(0, end - (1 << 16))
+            cut = os.pread(fd, end - start, start).rfind(b"\n")
+            if cut >= 0:
+                keep = start + cut + 1
+                break
+            end = start
+        os.ftruncate(fd, keep)
+        os.fsync(fd)
+        return size - keep
+    finally:
+        os.close(fd)
+
+
 def ensure_dir_inside(path: str, root: str, mode: int = 0o700) -> None:
     """Create ``path`` folder by folder below ``root``, never through a symlink.
 

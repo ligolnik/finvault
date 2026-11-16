@@ -119,6 +119,10 @@ use `lock --skip-sweep` to close without sweeping.
 Each file is copied into a new private file in the archive and linked in, so nothing is written through
 a symlink placed there, and the source is deleted only if it did not change during the copy.
 A half-written last line in the archive (from a full disk, say) is cut before the next append.
+Before each rewrite of `history.jsonl` (and before `restore-history`), `lsof` checks who has it open.
+A process that keeps it open, rather than opening, appending and closing, would go on appending to the
+replaced file and lose those lines, so the sweep refuses with exit `3` and lists it under `busy`.
+`status` shows such processes as `history_holders`.
 The archive folder must be a real folder inside the unlocked image: the sweep refuses a symlink anywhere on the way.
 `migrate` refuses a folder that already holds an entry named `archive_subdir`, which is reserved for the sweep.
 
@@ -135,7 +139,8 @@ The archive folder must be a real folder inside the unlocked image: the sweep re
 ## What it protects against
 
 - **Protected:** while locked, the images hold no plain text, and every mountpoint is an empty mode-000 folder. Other programs and agents running as you can't read the vault.
-- **Not protected:** while unlocked, anything running as you can read the vault. Copies already elsewhere (cloud services, git remotes, email) are out of scope.
+- **Not protected:** while unlocked, anything running as you can read the vault.
+- **Known limit of the sweep:** a process that opens `history.jsonl` after the `lsof` check and keeps it open across the rename (a window of milliseconds) loses what it appends afterwards. Copies already elsewhere (cloud services, git remotes, email) are out of scope.
 
 ## Development
 

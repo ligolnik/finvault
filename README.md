@@ -13,6 +13,26 @@ When the vault is locked, the data on disk can't be read.
 
 Lock and unlock are always run by hand. finvault installs no launchd jobs, timers or login items.
 
+## Why
+
+On one Mac, many programs run as you: AI coding agents working in different projects and apps,
+editors, sync tools. Any of them can read any folder you can. finvault is for a folder of sensitive
+files, finances for example, that should be readable only while you are deliberately working in it.
+
+- **Locked, the data is unreadable.** It sits encrypted inside its image, and the folder itself is an
+  empty mode-000 directory, so an agent that wanders in finds nothing and can't write there either.
+- **Agents keep copies of what they read.** Claude Code writes your prompts, pasted text and file
+  backups into files every session shares, under `~/.claude`. Locking only the folder would leave
+  those copies readable from any other project. So `lock` first moves the vault's part of them into
+  the vault (the sweep), and `restore-history` puts them back if you ever need them.
+- **Only you can unlock it.** Unlock needs the passphrase typed by hand. There is no Keychain entry,
+  timer or background job an agent could use to open the vault on its own.
+- **Locking is safe to ask for.** `lock` refuses while anything still has files open in the vault, or
+  while the sweep can't check everything it must move, rather than half-locking.
+
+While the vault is unlocked, anything running as you can read it. finvault shortens that window;
+it doesn't replace being careful about what runs while it is open.
+
 ## Requirements
 
 - macOS with `hdiutil`, `plutil`, `rsync` and `lsof` (all built in).
@@ -126,6 +146,8 @@ Before each rewrite of `history.jsonl` (and before `restore-history`), `lsof` ch
 A process that keeps it open, rather than opening, appending and closing, would go on appending to the
 replaced file and lose those lines, so the sweep refuses with exit `3` and lists it under `busy`.
 `status` shows such processes as `history_holders`.
+Claude Code opens, appends and closes the file for each entry, so this doesn't block `lock` in normal use
+(checked with `lsof` against 42 running sessions while the file grew).
 The archive folder must be a real folder inside the unlocked image: the sweep refuses a symlink anywhere on the way.
 `migrate` refuses a folder that already holds an entry named `archive_subdir`, which is reserved for the sweep.
 
@@ -159,6 +181,7 @@ scripts/check.sh     # ruff, ruff format, pyright, shellcheck, tests: the same g
 - `hc` is always faked in tests.
 - `tests/test_hdiutil_integration.py` creates, attaches and detaches real throwaway encrypted images in a temp folder. It runs on macOS, including CI's macOS runner. Set `FINVAULT_SKIP_HDIUTIL=1` to skip it.
 - State file formats are in `docs/state.md`.
+- Agents working on this repo: read [AGENTS.md](AGENTS.md) first.
 - For secret scanning before commits: `pip install pre-commit && pre-commit install`.
 
 ## License

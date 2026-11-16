@@ -555,9 +555,13 @@ def _require_history_released(cfg: Config, deps: Deps) -> None:
         )
 
 
-def _run_sweep(cfg: Config, deps: Deps) -> dict[str, object]:
+def _run_sweep(cfg: Config, deps: Deps) -> tuple[dict[str, object], set[str]]:
     """Sweep, then plan again until nothing is left, so a late write or an
-    interrupted earlier sweep cannot leave traces behind."""
+    interrupted earlier sweep cannot leave traces behind.
+
+    Returns the report and the vault's session ids from the final plan, for the
+    check after the images close (their projects folders can't be read then).
+    """
     assert cfg.sweep is not None
     archive_dir = cfg.sweep_archive_dir()
     assert archive_dir is not None
@@ -573,7 +577,7 @@ def _run_sweep(cfg: Config, deps: Deps) -> dict[str, object]:
                     details={"problems": list(plan.problems)},
                 )
             if plan.is_empty():
-                return plan.counts() if total is None else total
+                return (plan.counts() if total is None else total), plan.session_ids
             if attempt > SWEEP_ATTEMPTS:
                 break
             if plan.vaulted:
@@ -632,9 +636,10 @@ def lock(cfg: Config, deps: Deps, *, force: bool = False, skip_sweep: bool = Fal
         )
 
     sweep_report: dict[str, object] | None = None
+    session_ids: set[str] = set()
     if cfg.sweep is not None and not skip_sweep:
         _require_archive_unlocked(cfg, att)
-        sweep_report = _run_sweep(cfg, deps)
+        sweep_report, session_ids = _run_sweep(cfg, deps)
 
     locked: list[str] = []
     failed: list[dict[str, str]] = []
@@ -654,18 +659,20 @@ def lock(cfg: Config, deps: Deps, *, force: bool = False, skip_sweep: bool = Fal
         "killed": killed,
         "terminals": _term_report(terms),
     }
-    late = 0
+    left: dict[str, object] = {}
     if sweep_report is not None and cfg.sweep is not None:
-        # A session outside the vault can still write about it after the last
-        # sweep pass; say so rather than report a clean lock.
-        late = sw.vaulted_history_lines(cfg.sweep, cfg.vault_paths())
-        if late:
-            data["history_lines_written_while_locking"] = late
+        # A session can still write about the vault after the last sweep pass
+        # (history, backups, scratch); say so rather than report a clean lock.
+        left = sw.traces_left(cfg.sweep, cfg.vault_paths(), session_ids)
+        if left:
+            data["written_while_locking"] = left
+            if "history_lines" in left:
+                data["history_lines_written_while_locking"] = left["history_lines"]
             deps.warn(
-                f"{late} vault history line(s) were written while locking and are still outside the vault; "
-                "close the Claude Code session writing them, then unlock and lock again"
+                "vault traces were written while locking and are still outside the vault "
+                f"({', '.join(sorted(left))}); close the session writing them, then unlock and lock again"
             )
-    return Outcome(data, EXIT_FAILURE if failed or late else EXIT_OK)
+    return Outcome(data, EXIT_FAILURE if failed or left else EXIT_OK)
 
 
 # ----------------------------------------------------------------- status
@@ -755,7 +762,8 @@ def sweep(cfg: Config, deps: Deps, *, dry_run: bool) -> Outcome:
         plan = sw.plan_sweep(cfg.sweep, cfg.vault_paths(), cfg.sweep_archive_dir())
         return Outcome({"dry_run": True, **plan.counts()})
     _require_archive_unlocked(cfg, attached_by_folder(cfg, deps))
-    return Outcome({"dry_run": False, **_run_sweep(cfg, deps)})
+    report, _sessions = _run_sweep(cfg, deps)
+    return Outcome({"dry_run": False, **report})
 
 
 def restore_history(cfg: Config, deps: Deps) -> Outcome:

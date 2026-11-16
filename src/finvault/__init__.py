@@ -1,3 +1,3 @@
 """finvault: keep folders in encrypted APFS sparse bundles on macOS."""
 
-__version__ = "0.1.8"
+__version__ = "0.1.9"

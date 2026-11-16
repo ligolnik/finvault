@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.9 — 2026-11-16
+
+### Fixed
+
+- A busy detach still failed on CI after 0.1.8's five 1 s retries (run 43905069899): something not visible to a non-root `lsof` held the freshly migrated volume for longer, most likely Spotlight indexing it (unconfirmed). `lock` now keeps trying for up to 30 s (15 tries, 2 s apart), warns once that it is waiting, and its final hint says the volume may still be being indexed. On a `lock` failure the integration test now also prints the loop cycle and the running Spotlight processes, to confirm or rule out the cause.
+
 ## 0.1.8 — 2026-11-16
 
 ### Fixed

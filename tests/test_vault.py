@@ -14,7 +14,7 @@ from pathlib import Path
 from finvault import cli, vault
 from finvault.config import Config, Folder
 from finvault.errors import EXIT_BUSY, EXIT_MISMATCH, FinvaultError
-from finvault.platform import Process, Terminal
+from finvault.platform import Attached, Process, Terminal
 from tests.helpers import FakePlatform, TempDirTest, fake_deps, make_config
 
 
@@ -455,6 +455,44 @@ class LockUnlockTest(VaultTestBase):
             os.chmod(file_history, 0o700)
         self.assertEqual(out.exit_code, 1)
         self.assertEqual(out.data["written_while_locking"], {"unreadable": [file_history]})
+
+    def test_lock_waits_for_hdiutil_info_to_drop_a_closed_image(self) -> None:
+        cfg, platform, deps = self.setup_vault()
+        real_attached = platform.attached_images
+        stale: list[Attached] = []
+        real_detach = platform.detach
+
+        def detach_and_lag(device: str) -> None:
+            stale.extend(a for a in real_attached() if a.device == device)
+            real_detach(device)
+
+        def lagging_list() -> list[Attached]:
+            out = real_attached() + stale[:]
+            stale.clear()  # the next look is current
+            return out
+
+        platform.detach = detach_and_lag  # type: ignore[method-assign]  # hdiutil info lags a detach
+        platform.attached_images = lagging_list  # type: ignore[method-assign]
+        out = vault.lock(cfg, deps)
+        self.assertEqual(out.exit_code, 0, out.data)
+        self.assertEqual(sorted(out.data["mode_000"]), ["docs", "notes"])  # type: ignore[arg-type]
+        for f in cfg.folders:
+            self.assertEqual(mode(f.path), 0o000)
+
+    def test_lock_fails_when_a_closed_folder_cant_be_set_to_000(self) -> None:
+        cfg, platform, deps = self.setup_vault()
+        docs = cfg.folder("docs").path
+        real_detach = platform.detach
+
+        def detach_then_drop_a_file(device: str) -> None:
+            real_detach(device)
+            if not os.path.ismount(docs) and not os.listdir(docs):
+                Path(docs, ".stray").write_text("x")
+
+        platform.detach = detach_then_drop_a_file  # type: ignore[method-assign]  # something writes into the mountpoint
+        out = vault.lock(cfg, deps)
+        self.assertEqual(out.exit_code, 1)
+        self.assertEqual(out.data["not_mode_000"], ["docs"])
 
     def test_verify_ignores_the_sweep_archive_written_after_migrate(self) -> None:
         cfg, _platform, deps = self.setup_vault()

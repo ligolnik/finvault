@@ -39,6 +39,8 @@ KILL_WAIT_SEC = 15.0
 KILL_POLL_SEC = 0.5
 SWEEP_ATTEMPTS = 3
 SWEEP_RETRY_SEC = 1.0
+DETACH_SETTLE_SEC = 5.0
+DETACH_POLL_SEC = 0.25
 HOLDER_CHECKS = 3
 HOLDER_RECHECK_SEC = 0.2
 SIZE_UNITS = {"m": 1, "g": 1024, "t": 1024 * 1024}
@@ -485,6 +487,21 @@ def unlock(cfg: Config, deps: Deps) -> Outcome:
 # ------------------------------------------------------------------- lock
 
 
+def _settled_after_detach(cfg: Config, deps: Deps, closed: list[str]) -> dict[str, Attached]:
+    """Attached images once the ones just closed have left ``hdiutil info``.
+
+    The list can lag a detach for a moment; a folder still on it is never set to
+    mode 000, so wait (up to ``DETACH_SETTLE_SEC``) rather than skip it.
+    """
+    att = attached_by_folder(cfg, deps)
+    waited = 0.0
+    while any(name in att for name in closed) and waited < DETACH_SETTLE_SEC:
+        deps.sleep(DETACH_POLL_SEC)
+        waited += DETACH_POLL_SEC
+        att = attached_by_folder(cfg, deps)
+    return att
+
+
 def _relock_mountpoints(cfg: Config, deps: Deps, att: dict[str, Attached]) -> list[str]:
     """Set each closed vault folder to mode 000. Never touches a folder with files."""
     done: list[str] = []
@@ -649,8 +666,14 @@ def lock(cfg: Config, deps: Deps, *, force: bool = False, skip_sweep: bool = Fal
             locked.append(name)
         except FinvaultError as exc:
             failed.append({"name": name, "reason": str(exc)})
-    att_after = attached_by_folder(cfg, deps)
+    att_after = _settled_after_detach(cfg, deps, locked)
     relocked = _relock_mountpoints(cfg, deps, att_after)
+    not_locked = [n for n in locked if n not in relocked]
+    if not_locked:
+        deps.warn(
+            f"{', '.join(not_locked)} closed but not set to mode 000 "
+            "(hdiutil still lists the image, or the folder has files); run finvault lock again"
+        )
     data: dict[str, object] = {
         "locked": locked,
         "mode_000": relocked,
@@ -672,7 +695,9 @@ def lock(cfg: Config, deps: Deps, *, force: bool = False, skip_sweep: bool = Fal
                 "vault traces were written while locking and are still outside the vault "
                 f"({', '.join(sorted(left))}); close the session writing them, then unlock and lock again"
             )
-    return Outcome(data, EXIT_FAILURE if failed or left else EXIT_OK)
+    if not_locked:
+        data["not_mode_000"] = not_locked
+    return Outcome(data, EXIT_FAILURE if failed or left or not_locked else EXIT_OK)
 
 
 # ----------------------------------------------------------------- status

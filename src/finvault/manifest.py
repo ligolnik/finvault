@@ -100,6 +100,14 @@ def sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
+def _walk_error(err: OSError) -> None:
+    """Fail the walk: a folder that can't be listed must never look empty."""
+    raise FinvaultError(
+        f"can't read {err.filename}: {err.strerror}",
+        "make every folder in it readable (chmod u+rx) and run the command again",
+    ) from err
+
+
 def build_manifest(root: str, *, volume_root: bool = False, exclude: frozenset[str] = frozenset()) -> Manifest:
     """Hash every file under ``root``.
 
@@ -108,7 +116,7 @@ def build_manifest(root: str, *, volume_root: bool = False, exclude: frozenset[s
     """
     m = Manifest()
     skip: frozenset[str] = (VOLUME_ENTRIES if volume_root else frozenset[str]()) | exclude
-    for dirpath, dirnames, all_files in os.walk(root, topdown=True, followlinks=False):
+    for dirpath, dirnames, all_files in os.walk(root, topdown=True, onerror=_walk_error, followlinks=False):
         rel_dir = os.path.relpath(dirpath, root)
         filenames = all_files
         if rel_dir == "." and skip:

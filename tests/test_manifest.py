@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from finvault import manifest as mf
+from finvault.errors import FinvaultError
 from tests.helpers import TempDirTest
 
 
@@ -40,6 +41,16 @@ class ManifestTest(TempDirTest):
         mf.save_manifest(root, m)
         self.assertTrue(mf.compare(m, mf.load_manifest(root)).ok())
         self.assertTrue(mf.compare(m, mf.build_manifest(root, volume_root=True)).ok())
+
+    def test_a_folder_that_cant_be_read_fails_the_walk(self) -> None:
+        root = self.build_tree()
+        os.chmod(self.path("root", "history"), 0o000)
+        try:
+            with self.assertRaises(FinvaultError) as ctx:
+                mf.build_manifest(root)
+        finally:
+            os.chmod(self.path("root", "history"), 0o700)
+        self.assertIn("history", ctx.exception.message)
 
 
 if __name__ == "__main__":

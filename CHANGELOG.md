@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.8 — 2026-11-16
+
+### Fixed
+
+- `lock` failed with "Resource busy" when macOS still held a volume for a moment after the last process using it had exited, even though `lsof` showed nothing open. A busy detach is now tried up to 5 times, 1 s apart, looking the device up again each time; it is never forced. This was also the cause of the mode-700 folder seen on CI after 0.1.6: that detach failed as busy, the volume unmounted moments later, and the folder was skipped. The integration test's new output (0.1.7) showed it (run 43901948034).
+
 ## 0.1.7 — 2026-11-16
 
 ### Fixed

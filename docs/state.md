@@ -57,6 +57,9 @@ data. It is never stored outside the image.
 ## Sweep archive: `<archive folder>/<archive_subdir>/`
 
 Inside the configured `sweep.archive_folder`, so it is encrypted with that image.
+No component of this path, and none of the entries below, may be a symlink;
+the sweep refuses one rather than write outside the image. `verify` leaves this
+folder out of both the checksum list and the folder it checks.
 
 - `history.jsonl`: swept lines, byte-for-byte, appended without duplicates.
 - `paste-cache/<hash>.txt`: paste files only vaulted lines referenced.

@@ -106,10 +106,14 @@ Claude Code writes some files shared by every session, so they can't live in an 
 At each lock, finvault moves the vault's part of them into `<archive folder>/<archive_subdir>/`
 inside the vault:
 
-- `history.jsonl`: lines whose `project` is a vault folder or sits under one. The remaining lines are written back atomically (temp file, fsync, rename). If the file's size or modification time changes during the run, the sweep stops with no changes, and `lock` retries.
-- `paste-cache/<hash>.txt`: files referenced only by the moved lines.
+- `history.jsonl`: lines whose `project` is a vault folder or sits under one. The remaining lines are written back atomically (temp file, fsync, rename). If the file's size or modification time changes during the run, the sweep stops with no changes, and `lock` retries. A line another session appends in the instant of the rename is read back from the old file and sorted into the archive or the new history.
+- `paste-cache/<hash>.txt`: files referenced only by the moved lines, or by lines already in the archive (so a paste left behind by an interrupted sweep is found again).
 - `file-history/<sessionId>/`: backups for sessions with a `<sessionId>.jsonl` in a vaulted `~/.claude/projects` folder.
 - Scratchpad folders under `scratch_root` that match `scratch_globs` are deleted.
+
+`lock` plans the sweep again after each pass and closes the images only once nothing is left to move.
+The archive folder must be a real folder inside the unlocked image: the sweep refuses a symlink anywhere on the way.
+`migrate` refuses a folder that already holds an entry named `archive_subdir`, which is reserved for the sweep.
 
 ## Rollback
 

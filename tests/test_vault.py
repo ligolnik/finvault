@@ -359,6 +359,51 @@ class LockUnlockTest(VaultTestBase):
         self.assertEqual(out.data["history_lines_written_while_locking"], 1)
         self.assertEqual(platform.mounts, {})
 
+    def test_lock_refuses_to_sweep_while_a_process_holds_history_open(self) -> None:
+        cfg, platform, deps = self.setup_vault()
+        assert cfg.sweep is not None
+        docs = cfg.folder("docs").path
+        entry: dict[str, object] = {"display": "x", "pastedContents": {}, "timestamp": 1, "project": docs}
+        self.write("claude/history.jsonl", json.dumps(entry) + "\n")
+        before = Path(cfg.sweep.history).read_bytes()
+        platform.busy[os.path.realpath(cfg.sweep.history)] = [Process(4242, "claude", [cfg.sweep.history])]
+        status = vault.status(cfg, deps).data
+        self.assertEqual(status["history_holders"], [{"pid": 4242, "command": "claude", "files": [cfg.sweep.history]}])
+        with self.assertRaises(FinvaultError) as ctx:
+            vault.lock(cfg, deps)
+        self.assertEqual(ctx.exception.exit_code, EXIT_BUSY)
+        self.assertEqual(ctx.exception.details["busy"], status["history_holders"])
+        self.assertEqual(len(platform.mounts), 2)
+        self.assertEqual(Path(cfg.sweep.history).read_bytes(), before)
+        with self.assertRaises(FinvaultError):
+            vault.restore_history(cfg, deps)
+        del platform.busy[os.path.realpath(cfg.sweep.history)]
+        self.assertEqual(vault.lock(cfg, deps).data["sweep"]["history_lines"], 1)  # type: ignore[index]
+
+    def test_a_brief_history_append_does_not_block_lock(self) -> None:
+        cfg, platform, deps = self.setup_vault()
+        assert cfg.sweep is not None
+        docs = cfg.folder("docs").path
+        entry: dict[str, object] = {"display": "x", "pastedContents": {}, "timestamp": 1, "project": docs}
+        self.write("claude/history.jsonl", json.dumps(entry) + "\n")
+        key = os.path.realpath(cfg.sweep.history)
+        platform.busy[key] = [Process(4242, "claude", [cfg.sweep.history])]
+        real_open = platform.open_files
+        checks: list[str] = []
+
+        def closes_after_first_look(path: str, *, recursive: bool = False) -> list[Process]:
+            found = real_open(path, recursive=recursive)
+            if os.path.realpath(path) == key:
+                checks.append(path)
+                platform.busy.pop(key, None)
+            return found
+
+        platform.open_files = closes_after_first_look  # type: ignore[method-assign]  # the append finishes
+        out = vault.lock(cfg, deps)
+        self.assertEqual(out.exit_code, 0)
+        self.assertEqual(len(checks), 2)
+        self.assertEqual(Path(cfg.sweep.history).read_text(), "")
+
     def test_verify_ignores_the_sweep_archive_written_after_migrate(self) -> None:
         cfg, _platform, deps = self.setup_vault()
         docs = cfg.folder("docs").path

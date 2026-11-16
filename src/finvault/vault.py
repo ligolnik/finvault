@@ -39,6 +39,8 @@ KILL_WAIT_SEC = 15.0
 KILL_POLL_SEC = 0.5
 SWEEP_ATTEMPTS = 3
 SWEEP_RETRY_SEC = 1.0
+HOLDER_CHECKS = 3
+HOLDER_RECHECK_SEC = 0.2
 SIZE_UNITS = {"m": 1, "g": 1024, "t": 1024 * 1024}
 
 
@@ -520,6 +522,39 @@ def _add_counts(total: dict[str, object], more: dict[str, object]) -> dict[str, 
     return out
 
 
+def _history_holders(cfg: Config, deps: Deps) -> list[Process]:
+    """Processes other than finvault that have the shared history file open."""
+    assert cfg.sweep is not None
+    if not os.path.lexists(cfg.sweep.history):
+        return []
+    return [p for p in deps.platform.open_files(cfg.sweep.history) if p.pid != os.getpid()]
+
+
+def _require_history_released(cfg: Config, deps: Deps) -> None:
+    """Refuse to rewrite history while a process holds it open.
+
+    The rewrite renames a new file over the old one; a process that already has
+    the old file open would keep appending to it, and those lines would be lost.
+    """
+    assert cfg.sweep is not None
+    holders = _history_holders(cfg, deps)
+    for _ in range(HOLDER_CHECKS - 1):
+        if not holders:
+            break
+        # An append that opens and closes the file is caught now and then; only
+        # a process still holding it a moment later blocks the rewrite.
+        deps.sleep(HOLDER_RECHECK_SEC)
+        holders = _history_holders(cfg, deps)
+    if holders:
+        raise FinvaultError(
+            f"{len(holders)} process(es) keep {cfg.sweep.history} open; rewriting it now would lose what they "
+            "write next",
+            "quit them (see busy), or use lock --skip-sweep to close without sweeping, then run it again",
+            EXIT_BUSY,
+            {"busy": _busy_report(holders)},
+        )
+
+
 def _run_sweep(cfg: Config, deps: Deps) -> dict[str, object]:
     """Sweep, then plan again until nothing is left, so a late write or an
     interrupted earlier sweep cannot leave traces behind."""
@@ -541,6 +576,7 @@ def _run_sweep(cfg: Config, deps: Deps) -> dict[str, object]:
                 return plan.counts() if total is None else total
             if attempt > SWEEP_ATTEMPTS:
                 break
+            _require_history_released(cfg, deps)
             done = sw.apply_sweep(plan, cfg.sweep, archive_dir, vault_root, cfg.vault_paths())
             total = done if total is None else _add_counts(total, done)
         except ConcurrentChangeError:
@@ -658,7 +694,9 @@ def status(cfg: Config, deps: Deps) -> Outcome:
             warnings.append(f"{f.path} holds files while its image is closed")
         folders.append(entry)
     pending: dict[str, object] | None = None
+    history_holders: list[dict[str, object]] | None = None
     if cfg.sweep is not None:
+        history_holders = _busy_report(_history_holders(cfg, deps))
         try:
             pending = sw.plan_sweep(cfg.sweep, cfg.vault_paths(), cfg.sweep_archive_dir()).counts()
         except ConcurrentChangeError:
@@ -669,6 +707,7 @@ def status(cfg: Config, deps: Deps) -> Outcome:
         "folders": folders,
         "terminals": _term_report(_busy_terminals(deps, _open_in_vault(deps, att))),
         "sweep_pending": pending,
+        "history_holders": history_holders,
         "warnings": warnings,
     }
     return Outcome(data)
@@ -725,4 +764,5 @@ def restore_history(cfg: Config, deps: Deps) -> Outcome:
     _require_archive_unlocked(cfg, attached_by_folder(cfg, deps))
     archive_dir = cfg.sweep_archive_dir()
     assert archive_dir is not None
+    _require_history_released(cfg, deps)
     return Outcome(sw.restore_history(cfg.sweep, archive_dir))

@@ -71,7 +71,7 @@ Every command prints JSON on stdout and diagnostics on stderr.
 | `finvault migrate <name>` | Hash every file, copy the folder into its image with `rsync -aE` at a temporary path, check the copy, rename the original to `<path>.plain`, unlock the image at the real path and check again. **Never deletes anything.** |
 | `finvault archive` | Build a read-only, encrypted, compressed image of every `.plain` folder in `<state_dir>/archive/`, then check it. |
 | `finvault unlock` | Ask for the passphrase once, set each mountpoint from 000 back to 700, and unlock every image at its path. Refuses a mountpoint that holds files. |
-| `finvault lock [--force] [--skip-sweep]` | Refuse while any process has files open in the vault (`lsof`), listing the `hc` terminals those processes run under. A terminal is matched by process ancestry (each busy pid's parents up to a terminal's pid or foreground pid from `hc get`), never by the folder it started in. `--force` ends those terminals with `hc kill`, except any terminal `finvault` itself runs under (`"self": true`). Then sweep, close every image, and set each mountpoint to mode 000. Exits `1` if vault traces were written while the images closed: history lines, backups for the vault's sessions, or matching scratch folders (`written_while_locking`). Unlock and lock again. |
+| `finvault lock [--force] [--skip-sweep]` | Refuse while any process has files open in the vault (`lsof`), listing the `hc` terminals those processes run under. A terminal is matched by process ancestry (each busy pid's parents up to a terminal's pid or foreground pid from `hc get`), never by the folder it started in. `--force` ends those terminals with `hc kill`, except any terminal `finvault` itself runs under (`"self": true`). Then sweep, close every image, and set each mountpoint to mode 000. Exits `1` if vault traces were written while the images closed: history lines, backups for the vault's sessions, or matching scratch folders (`written_while_locking`), or a folder it could no longer read to check (`unreadable`). Unlock and lock again. |
 | `finvault status` | Which images are unlocked, busy processes, the `hc` terminals they run under, and how much is waiting to be swept. |
 | `finvault verify` | Check each unlocked image against the checksum list saved inside it at migration. |
 | `finvault sweep [--dry-run]` | Run the sweep by itself (needs the sweep archive folder unlocked unless `--dry-run`). |
@@ -114,8 +114,8 @@ inside the vault:
 `lock` plans the sweep again after each pass and closes the images only once nothing is left to move.
 It also refuses to close anything while the sweep can't check everything it must move: a projects,
 `file-history`, `paste-cache` or scratch folder it can't read, a `file-history` session that is a symlink,
-a `history.jsonl`, paste or backup with a second hard link, or a temp file a killed history rewrite left
-beside `history.jsonl`. The reasons are listed under `problems`; fix them, or
+a `history.jsonl`, paste or backup with a second hard link, or a temp file a killed history rewrite or
+paste restore left behind (`.history.jsonl.*.tmp`, `paste-cache/.finvault-*.tmp`). The reasons are listed under `problems`; fix them, or
 use `lock --skip-sweep` to close without sweeping.
 Each file is copied into a new private file in the archive and linked in, so nothing is written through
 a symlink placed there, and the source is deleted only if it did not change during the copy.

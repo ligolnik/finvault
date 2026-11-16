@@ -40,8 +40,8 @@ KILL_POLL_SEC = 0.5
 SWEEP_ATTEMPTS = 3
 SWEEP_RETRY_SEC = 1.0
 DETACH_SETTLE_SEC = 5.0
-DETACH_ATTEMPTS = 5
-DETACH_RETRY_SEC = 1.0
+DETACH_ATTEMPTS = 15
+DETACH_RETRY_SEC = 2.0
 DETACH_POLL_SEC = 0.25
 HOLDER_CHECKS = 3
 HOLDER_RECHECK_SEC = 0.2
@@ -157,8 +157,17 @@ def _detach_image(cfg: Config, deps: Deps, image: str) -> None:
             deps.platform.detach(att.device)
             return
         except FinvaultError as exc:
-            if exc.exit_code != EXIT_BUSY or attempt == DETACH_ATTEMPTS:
+            if exc.exit_code != EXIT_BUSY:
                 raise
+            if attempt == DETACH_ATTEMPTS:
+                raise FinvaultError(
+                    exc.message,
+                    "macOS may still be indexing the volume (Spotlight), or a program not visible to lsof holds it; "
+                    "wait a minute and run finvault lock again",
+                    EXIT_BUSY,
+                ) from exc
+            if attempt == 1:
+                deps.warn(f"{image} is still busy; trying again for up to {int(DETACH_ATTEMPTS * DETACH_RETRY_SEC)} s")
             deps.sleep(DETACH_RETRY_SEC)
 
 

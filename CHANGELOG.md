@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- A process that kept `history.jsonl` open across a sweep went on appending to the replaced file, and those lines were lost. Before each rewrite (and before `restore-history`), `lsof` now checks the file; a holder still there after three looks 0.2 s apart makes the sweep refuse with exit 3 and the holders under `busy`. `status` lists them as `history_holders`. The README states the remaining window: a process that opens the file after the check and holds it across the rename.
+- A process that kept `history.jsonl` open across a sweep went on appending to the replaced file, and those lines were lost. Before each rewrite (and before `restore-history`), `lsof` now checks the file; a holder still there after three looks 0.2 s apart makes the sweep refuse with exit 3 and the holders under `busy`. `status` lists them as `history_holders`. A sweep that doesn't rewrite history (only scratch folders, say) is not blocked. The README states the remaining window: a process that opens the file after the check and holds it across the rename.
 
 ## 0.1.4 — 2026-11-16
 

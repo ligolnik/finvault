@@ -576,7 +576,8 @@ def _run_sweep(cfg: Config, deps: Deps) -> dict[str, object]:
                 return plan.counts() if total is None else total
             if attempt > SWEEP_ATTEMPTS:
                 break
-            _require_history_released(cfg, deps)
+            if plan.vaulted:
+                _require_history_released(cfg, deps)
             done = sw.apply_sweep(plan, cfg.sweep, archive_dir, vault_root, cfg.vault_paths())
             total = done if total is None else _add_counts(total, done)
         except ConcurrentChangeError:

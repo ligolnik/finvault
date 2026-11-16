@@ -531,6 +531,12 @@ def _run_sweep(cfg: Config, deps: Deps) -> dict[str, object]:
     for attempt in range(1, SWEEP_ATTEMPTS + 2):
         try:
             plan = sw.plan_sweep(cfg.sweep, cfg.vault_paths(), archive_dir)
+            if not plan.is_complete():
+                raise FinvaultError(
+                    "the sweep can't check everything it must move; nothing was closed",
+                    "fix each problem listed (unlock every folder first), or use lock --skip-sweep, then lock again",
+                    details={"problems": list(plan.problems)},
+                )
             if plan.is_empty():
                 return plan.counts() if total is None else total
             if attempt > SWEEP_ATTEMPTS:
@@ -611,7 +617,18 @@ def lock(cfg: Config, deps: Deps, *, force: bool = False, skip_sweep: bool = Fal
         "killed": killed,
         "terminals": _term_report(terms),
     }
-    return Outcome(data, EXIT_FAILURE if failed else EXIT_OK)
+    late = 0
+    if sweep_report is not None and cfg.sweep is not None:
+        # A session outside the vault can still write about it after the last
+        # sweep pass; say so rather than report a clean lock.
+        late = sw.vaulted_history_lines(cfg.sweep, cfg.vault_paths())
+        if late:
+            data["history_lines_written_while_locking"] = late
+            deps.warn(
+                f"{late} vault history line(s) were written while locking and are still outside the vault; "
+                "close the Claude Code session writing them, then unlock and lock again"
+            )
+    return Outcome(data, EXIT_FAILURE if failed or late else EXIT_OK)
 
 
 # ----------------------------------------------------------------- status

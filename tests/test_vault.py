@@ -322,6 +322,43 @@ class LockUnlockTest(VaultTestBase):
         archived = Path(docs, ".finvault-sweep", "history.jsonl").read_text()
         self.assertIn('"timestamp": 1', archived)
 
+    def test_lock_refuses_when_the_sweep_cant_read_a_source(self) -> None:
+        cfg, platform, deps = self.setup_vault()
+        assert cfg.sweep is not None
+        backup = self.write("claude/file-history/s/backup", "SECRET")
+        os.chmod(cfg.sweep.file_history, 0o000)
+        try:
+            with self.assertRaises(FinvaultError) as ctx:
+                vault.lock(cfg, deps)
+        finally:
+            os.chmod(cfg.sweep.file_history, 0o700)
+        self.assertIn("nothing was closed", ctx.exception.message)
+        self.assertEqual(len(platform.mounts), 2)
+        self.assertEqual(Path(backup).read_text(), "SECRET")
+
+    def test_lock_reports_history_written_while_it_closed_the_images(self) -> None:
+        cfg, platform, deps = self.setup_vault()
+        assert cfg.sweep is not None
+        docs = cfg.folder("docs").path
+        late: dict[str, object] = {
+            "display": "x",
+            "pastedContents": {},
+            "timestamp": 9,
+            "project": docs,
+            "sessionId": "s",
+        }
+        real_detach = platform.detach
+
+        def write_then_detach(device: str) -> None:
+            self.write("claude/history.jsonl", json.dumps(late) + "\n")
+            real_detach(device)
+
+        platform.detach = write_then_detach  # type: ignore[method-assign]  # a writer races the close
+        out = vault.lock(cfg, deps)
+        self.assertEqual(out.exit_code, 1)
+        self.assertEqual(out.data["history_lines_written_while_locking"], 1)
+        self.assertEqual(platform.mounts, {})
+
     def test_verify_ignores_the_sweep_archive_written_after_migrate(self) -> None:
         cfg, _platform, deps = self.setup_vault()
         docs = cfg.folder("docs").path

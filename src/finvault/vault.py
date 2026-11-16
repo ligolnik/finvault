@@ -27,8 +27,8 @@ from finvault.errors import (
     FinvaultError,
 )
 from finvault.jsonutil import as_dict
-from finvault.pathutil import is_under_any, path_variants, same_path
-from finvault.platform import Attached, Platform, Process, Terminal, size_mb
+from finvault.pathutil import same_path
+from finvault.platform import Attached, BusyTerminal, Platform, Process, match_terminals, size_mb
 
 STATE_SCHEMA_VERSION = 1
 STATE_MARKER = "vault.json"
@@ -191,20 +191,33 @@ def _busy_report(procs: list[Process]) -> list[dict[str, object]]:
     return [{"pid": p.pid, "command": p.command, "files": p.files[:5]} for p in procs]
 
 
-def _vault_terminals(cfg: Config, deps: Deps) -> list[Terminal] | None:
+def _busy_terminals(deps: Deps, procs: list[Process]) -> list[BusyTerminal] | None:
+    """The hc terminals the busy processes run under, found by process ancestry.
+
+    None when hc is unavailable; [] when nothing is busy (hc is not asked).
+    """
+    if not procs:
+        return []
     terms = deps.platform.hc_terminals()
     if terms is None:
         return None
-    roots: list[str] = []
-    for p in cfg.vault_paths():
-        roots.extend(path_variants(p))
-    return [t for t in terms if is_under_any(t.cwd, roots)]
+    parents = deps.platform.process_parents()
+    return match_terminals([p.pid for p in procs], parents, terms, os.getpid())
 
 
-def _term_report(terms: list[Terminal] | None) -> list[dict[str, str]] | None:
+def _term_report(terms: list[BusyTerminal] | None) -> list[dict[str, object]] | None:
     if terms is None:
         return None
-    return [{"address": t.address, "cwd": t.cwd, "where": t.where} for t in terms]
+    return [
+        {
+            "address": b.terminal.address,
+            "cwd": b.terminal.cwd,
+            "where": b.terminal.where,
+            "busy_pids": list(b.busy_pids),
+            "self": b.is_self,
+        }
+        for b in terms
+    ]
 
 
 def _manifest_excludes(cfg: Config, folder: Folder) -> frozenset[str]:
@@ -543,26 +556,30 @@ def _require_archive_unlocked(cfg: Config, att: dict[str, Attached]) -> None:
 def lock(cfg: Config, deps: Deps, *, force: bool = False, skip_sweep: bool = False) -> Outcome:
     check_state(cfg)
     att = attached_by_folder(cfg, deps)
-    terms = _vault_terminals(cfg, deps)
     if not att:
         return Outcome({"locked": [], "already_locked": _relock_mountpoints(cfg, deps, att), "sweep": None})
 
     killed: list[str] = []
     procs = _open_in_vault(deps, att)
-    if procs and force and terms:
-        for t in terms:
-            deps.platform.hc_kill(t.address)
-            killed.append(t.address)
+    terms = _busy_terminals(deps, procs)
+    to_kill = [b.terminal.address for b in terms or [] if not b.is_self]
+    if procs and force and to_kill:
+        for address in to_kill:
+            deps.platform.hc_kill(address)
+            killed.append(address)
         waited = 0.0
         while procs and waited < KILL_WAIT_SEC:
             deps.sleep(KILL_POLL_SEC)
             waited += KILL_POLL_SEC
             procs = _open_in_vault(deps, att)
-        terms = _vault_terminals(cfg, deps)
+        terms = _busy_terminals(deps, procs)
     if procs:
+        hint = "quit them (busy, terminals) or use --force to end the listed hc terminals"
+        if any(b.is_self for b in terms or []):
+            hint = "this terminal itself works in the vault (self: true); cd out of the vault and run lock again"
         raise FinvaultError(
             f"{len(procs)} process(es) still have files open in the vault",
-            "quit them (busy, terminals) or use --force to end the listed hc terminals",
+            hint,
             EXIT_BUSY,
             {"busy": _busy_report(procs), "terminals": _term_report(terms), "killed": killed},
         )
@@ -629,7 +646,7 @@ def status(cfg: Config, deps: Deps) -> Outcome:
             warnings.append("vault history lines are waiting outside the vault; unlock, then lock to sweep them")
     data: dict[str, object] = {
         "folders": folders,
-        "terminals": _term_report(_vault_terminals(cfg, deps)),
+        "terminals": _term_report(_busy_terminals(deps, _open_in_vault(deps, att))),
         "sweep_pending": pending,
         "warnings": warnings,
     }

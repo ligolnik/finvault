@@ -104,7 +104,7 @@ class SkillTest(unittest.TestCase):
         assert chain is not None
         self.assertEqual(int(chain[1]), finish.number)
         self.assertIn("as in Step 4", finish.body)
-        self.assertIn("Run `finvault status`", finish.body)
+        self.assertIn("Run `finvault status --json`", finish.body)
         questions = [q for q in re.findall(r'"([^"]*)"', finish.body) if q.rstrip().endswith("?") or "?" in q]
         self.assertTrue(any("locked now?" in q for q in questions), questions)
         for field in ("terminals", "busy_processes", "--force"):
@@ -125,6 +125,14 @@ class SkillTest(unittest.TestCase):
         for speech in quoted:
             with self.subTest(speech=speech):
                 self.assertNotRegex(speech, OFFER)
+
+    def test_every_status_the_agent_runs_asks_for_json(self) -> None:
+        # Without --json a terminal gets text for people; the skill reads the JSON fields.
+        statuses = re.findall(r"`(finvault status[^`]*)`", SKILL.read_text())
+        self.assertTrue(statuses)
+        for command in statuses:
+            with self.subTest(command=command):
+                self.assertIn("--json", command.split())
 
     def test_the_skill_never_offers_to_lock(self) -> None:
         self.assertNotRegex(SKILL.read_text(), OFFER)

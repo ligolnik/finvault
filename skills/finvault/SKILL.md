@@ -11,12 +11,13 @@ One chain is required: whenever you finish work that used a vault folder, run St
 
 ## Step 1 — Recognise a vault folder
 
-Run `finvault status` and match the folder against `folders[].path`.
+Run `finvault status --json` and match the folder against `folders[].path`.
 A configured vault folder can be an empty mode-000 directory when locked,
 or a mountpoint when unlocked. An empty folder or permission denial alone
 is not proof of a vault. Do not probe protected contents or repair permissions.
 If status fails, relay its diagnostics and ask the human to resolve them.
-The only finvault command this skill executes is `finvault status`;
+The only finvault command this skill executes is `finvault status --json` (always with `--json`:
+without it, a terminal gets text meant for people);
 every other command below is for the human to run manually.
 
 ## Step 2 — Respond to a locked folder
@@ -27,7 +28,7 @@ Never chmod a vault mountpoint, recreate it, or write replacement files into it.
 
 ## Step 3 — Explain status
 
-Run `finvault status` and explain its JSON in plain words:
+Run `finvault status --json` and explain its JSON in plain words:
 - `folders[].unlocked`: whether the image is mounted at its configured path;
   false does not guarantee the image is closed everywhere. Relay warnings.
 - `folders[].busy_processes`: count of processes with open files in that image;
@@ -79,7 +80,7 @@ clean up, or use them to bypass a locked folder. Ask the human to manage them.
 Run this before your final reply whenever the work you just did read or wrote a vault folder.
 1. Leave every vault folder and close what you own there, as in Step 4: move your shell's working
    directory outside every vault folder and close files, handles and tools you started that use it.
-2. Run `finvault status`.
+2. Run `finvault status --json`.
 3. End your reply by asking the human whether the vault should be locked now, for example:
    "I'm done with the vault folders. Should the vault be locked now? If so, run `finvault lock`."
    Name every terminal in `terminals` and any `busy_processes` count above zero: they would make

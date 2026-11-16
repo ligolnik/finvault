@@ -71,11 +71,11 @@ Every command prints JSON on stdout and diagnostics on stderr.
 | `finvault migrate <name>` | Hash every file, copy the folder into its image with `rsync -aE` at a temporary path, check the copy, rename the original to `<path>.plain`, unlock the image at the real path and check again. **Never deletes anything.** |
 | `finvault archive` | Build a read-only, encrypted, compressed image of every `.plain` folder in `<state_dir>/archive/`, then check it. |
 | `finvault unlock` | Ask for the passphrase once, set each mountpoint from 000 back to 700, and unlock every image at its path. Refuses a mountpoint that holds files. |
-| `finvault lock [--force] [--skip-sweep]` | Refuse while any process has files open in the vault (`lsof`), listing the `hc` terminals those processes run under. A terminal is matched by process ancestry (each busy pid's parents up to a terminal's pid or foreground pid from `hc get`), never by the folder it started in. `--force` ends those terminals with `hc kill`, except any terminal `finvault` itself runs under (`"self": true`). Then sweep, close every image, and set each mountpoint to mode 000. Exits `1` if vault history lines were written while the images closed (`history_lines_written_while_locking`); unlock and lock again. |
+| `finvault lock [--force] [--skip-sweep]` | Refuse while any process has files open in the vault (`lsof`), listing the `hc` terminals those processes run under. A terminal is matched by process ancestry (each busy pid's parents up to a terminal's pid or foreground pid from `hc get`), never by the folder it started in. `--force` ends those terminals with `hc kill`, except any terminal `finvault` itself runs under (`"self": true`). Then sweep, close every image, and set each mountpoint to mode 000. Exits `1` if vault traces were written while the images closed: history lines, backups for the vault's sessions, or matching scratch folders (`written_while_locking`). Unlock and lock again. |
 | `finvault status` | Which images are unlocked, busy processes, the `hc` terminals they run under, and how much is waiting to be swept. |
 | `finvault verify` | Check each unlocked image against the checksum list saved inside it at migration. |
 | `finvault sweep [--dry-run]` | Run the sweep by itself (needs the sweep archive folder unlocked unless `--dry-run`). |
-| `finvault restore-history` | Merge the swept history lines back into `history.jsonl` in timestamp order, and copy back missing paste files. |
+| `finvault restore-history` | Merge the swept history lines back into `history.jsonl` in timestamp order, and copy back missing paste files. A paste already there with different content is left alone and listed under `paste_files_differing`. |
 
 Exit codes: `0` success, `1` failure, `2` usage error, `3` vault busy, `4` checksum mismatch,
 `5` a shared file changed during the run (nothing was changed; run it again).
@@ -114,11 +114,14 @@ inside the vault:
 `lock` plans the sweep again after each pass and closes the images only once nothing is left to move.
 It also refuses to close anything while the sweep can't check everything it must move: a projects,
 `file-history`, `paste-cache` or scratch folder it can't read, a `file-history` session that is a symlink,
-or a `history.jsonl` with a second hard link. The reasons are listed under `problems`; fix them, or
+a `history.jsonl`, paste or backup with a second hard link, or a temp file a killed history rewrite left
+beside `history.jsonl`. The reasons are listed under `problems`; fix them, or
 use `lock --skip-sweep` to close without sweeping.
 Each file is copied into a new private file in the archive and linked in, so nothing is written through
 a symlink placed there, and the source is deleted only if it did not change during the copy.
 A half-written last line in the archive (from a full disk, say) is cut before the next append.
+If the archive fills up while saving lines written during the history rename, those lines go back into
+`history.jsonl`, so the next sweep finds them.
 Before each rewrite of `history.jsonl` (and before `restore-history`), `lsof` checks who has it open.
 A process that keeps it open, rather than opening, appending and closing, would go on appending to the
 replaced file and lose those lines, so the sweep refuses with exit `3` and lists it under `busy`.
@@ -140,7 +143,10 @@ The archive folder must be a real folder inside the unlocked image: the sweep re
 
 - **Protected:** while locked, the images hold no plain text, and every mountpoint is an empty mode-000 folder. Other programs and agents running as you can't read the vault.
 - **Not protected:** while unlocked, anything running as you can read the vault.
-- **Known limit of the sweep:** a process that opens `history.jsonl` after the `lsof` check and keeps it open across the rename (a window of milliseconds) loses what it appends afterwards. Copies already elsewhere (cloud services, git remotes, email) are out of scope.
+- **Known limit of the sweep:** a process that opens `history.jsonl` after the `lsof` check and keeps it open across the rename (a window of milliseconds) loses what it appends afterwards. Lines written during the rename
+  are lost if the vault image and the main disk are both full at that moment.
+- **Out of scope:** a process that can already write inside the unlocked vault can swap a folder in the sweep
+  archive for a symlink while a file is being moved, and send that file outside the vault. Copies already elsewhere (cloud services, git remotes, email) are out of scope.
 
 ## Development
 

@@ -6,6 +6,7 @@ fake and never called. Skipped off macOS, or when FINVAULT_SKIP_HDIUTIL=1.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import shlex
 import shutil
@@ -103,7 +104,9 @@ class HdiutilIntegrationTest(TempDirTest):
         self.write(f"work-{label}/Docs/secret.txt", f"marker-{label}\n", 0o600)
         self.write(f"work-{label}/Docs/deep/nested/file.bin", bytes(range(256)) * 64)
         os.symlink("deep/nested/file.bin", self.path(f"work-{label}", "Docs", "link"))
-        return cfg, fake_deps(self.platform, passphrase)
+        # Real images need real waiting: lock retries a briefly busy detach with deps.sleep,
+        # and fake_deps' no-op sleep would run every retry in the same instant.
+        return cfg, dataclasses.replace(fake_deps(self.platform, passphrase), sleep=time.sleep)
 
     def test_full_lifecycle(self) -> None:
         cfg, deps = self.make_vault("a", "integration passphrase a", two_folders=True)

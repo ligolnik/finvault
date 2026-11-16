@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.12 — 2026-11-16
+
+### Fixed
+
+- The real-image integration test failed now and then with "Resource busy" on detach, and longer retry budgets (0.1.8, 0.1.9) never helped. The diagnostics added in 0.1.9 showed why: a root `lsof` found nothing holding the volume when `lock` gave up, so the busy state was brief. The test built its dependencies with the fakes' no-op `sleep`, so all of `lock`'s retries ran in the same instant. The test now uses real sleeping, as `lock` does on a real Mac. No change to `finvault` itself.
+
 ## 0.1.11 — 2026-11-16
 
 ### Added

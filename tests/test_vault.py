@@ -83,6 +83,18 @@ class InitMigrateTest(VaultTestBase):
             vault.init(cfg, fake_deps(platform, "a different passphrase"), "notes")
         self.assertIn("wrong passphrase", ctx.exception.message)
 
+    def test_new_image_checks_the_passphrase_even_when_every_image_is_unlocked(self) -> None:
+        cfg = self.vault_config()
+        platform = FakePlatform()
+        deps = fake_deps(platform)
+        vault.init(cfg, deps, "docs")
+        vault.migrate(cfg, deps, "docs")
+        with self.assertRaises(FinvaultError) as ctx:
+            vault.init(cfg, fake_deps(platform, "a different passphrase"), "notes")
+        self.assertIn("wrong passphrase", ctx.exception.message)
+        self.assertFalse(os.path.exists(cfg.image_path(cfg.folder("notes"))))
+        self.assertTrue(vault.init(cfg, deps, "notes").data["created"])
+
     def test_migrate_keeps_plain_copy_and_unlocks_at_real_path(self) -> None:
         cfg, _platform, deps = self.setup_vault()
         docs = cfg.folder("docs").path

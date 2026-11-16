@@ -174,15 +174,19 @@ def _existing_unattached_image(cfg: Config, deps: Deps, exclude: str | None = No
 
 
 def _vault_passphrase(cfg: Config, deps: Deps, exclude: str | None = None) -> str:
-    """Ask for the vault's passphrase and check it against an image when one is closed."""
-    probe = _existing_unattached_image(cfg, deps, exclude)
-    any_image = any(os.path.isdir(cfg.image_path(f)) and cfg.image_path(f) != exclude for f in cfg.folders)
-    if not any_image:
+    """Ask for the vault's passphrase and check it against one of its images.
+
+    A closed image is preferred; an unlocked one is checked too, so a new image
+    or archive can never get a different passphrase.
+    """
+    images = [
+        cfg.image_path(f) for f in cfg.folders if cfg.image_path(f) != exclude and os.path.isdir(cfg.image_path(f))
+    ]
+    if not images:
         return deps.ask_new_passphrase()
+    probe = _existing_unattached_image(cfg, deps, exclude) or images[0]
     pw = deps.ask_passphrase()
-    if probe is None:
-        deps.warn("every image is unlocked, so the passphrase can't be checked now")
-    elif not deps.platform.check_passphrase(probe, pw):
+    if not deps.platform.check_passphrase(probe, pw):
         raise FinvaultError("wrong passphrase for this vault", "type the passphrase this vault's images use")
     return pw
 

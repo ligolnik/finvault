@@ -304,8 +304,24 @@ class MacPlatform:
         self._check(proc, f"closing {device}", "quit programs using the vault, then run finvault lock again")
 
     def check_passphrase(self, image: str, passphrase: str) -> bool:
+        """True when ``passphrase`` opens ``image``, attached or not.
+
+        hdiutil checks the passphrase before it opens the image, so on an
+        attached image the right passphrase gets "Resource temporarily
+        unavailable" (the image is in use) and a wrong one "Authentication error".
+        """
         proc = self._run(["hdiutil", "imageinfo", "-stdinpass", image], stdin=_stdin_pass(passphrase))
-        return proc.returncode == 0
+        if proc.returncode == 0:
+            return True
+        err = proc.stderr.decode(errors="replace").strip()
+        if "Authentication error" in err:
+            return False
+        if "Resource temporarily unavailable" in err:
+            return True
+        raise FinvaultError(
+            f"checking the passphrase for {image} failed (exit {proc.returncode}): {err}",
+            "check that the image exists and disk images work on this Mac, then run the command again",
+        )
 
     def create_archive(self, out: str, srcfolders: Sequence[str], volname: str, passphrase: str) -> None:
         argv = ["hdiutil", "create", "-fs", "APFS", "-format", "UDZO", "-encryption", "AES-256", "-stdinpass"]

@@ -380,6 +380,19 @@ class LockUnlockTest(VaultTestBase):
         del platform.busy[os.path.realpath(cfg.sweep.history)]
         self.assertEqual(vault.lock(cfg, deps).data["sweep"]["history_lines"], 1)  # type: ignore[index]
 
+    def test_a_history_holder_does_not_block_a_sweep_that_leaves_history_alone(self) -> None:
+        cfg, platform, deps = self.setup_vault()
+        assert cfg.sweep is not None
+        entry: dict[str, object] = {"display": "x", "pastedContents": {}, "timestamp": 1, "project": "/unrelated"}
+        self.write("claude/history.jsonl", json.dumps(entry) + "\n")
+        scratch = self.path("scratch", "-x-work-a-Docs")
+        os.makedirs(scratch)
+        platform.busy[os.path.realpath(cfg.sweep.history)] = [Process(4242, "claude", [cfg.sweep.history])]
+        out = vault.lock(cfg, deps)
+        self.assertEqual(out.exit_code, 0)
+        self.assertFalse(os.path.exists(scratch))
+        self.assertEqual(json.loads(Path(cfg.sweep.history).read_text()), entry)
+
     def test_a_brief_history_append_does_not_block_lock(self) -> None:
         cfg, platform, deps = self.setup_vault()
         assert cfg.sweep is not None

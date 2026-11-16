@@ -8,6 +8,7 @@ import io
 import re
 import shlex
 import unittest
+from dataclasses import dataclass
 from pathlib import Path
 
 from finvault.cli import build_parser
@@ -38,6 +39,45 @@ PREAMBLE = (
 )
 
 
+# Phrasings that offer to lock on the human's behalf; the skill must only ask.
+OFFER = re.compile(
+    r"(?i)\b(shall|should|can|may) I (lock|run)\b|\bwant me to\b|\bI('ll| will| can) (lock|run `finvault lock)"
+    r"|\blet me (lock|run `finvault lock)|\bI could lock\b"
+)
+
+
+@dataclass
+class Step:
+    number: int
+    title: str
+    body: str
+
+
+def _strip_frontmatter(text: str) -> str:
+    return re.sub(r"\A---\n.*?\n---\n", "", text, flags=re.DOTALL)
+
+
+def _steps(text: str) -> list[Step]:
+    parts = re.split(r"^## Step (\d+) — (.+)$", text, flags=re.MULTILINE)
+    return [Step(int(parts[i]), parts[i + 1], parts[i + 2]) for i in range(1, len(parts), 3)]
+
+
+def _step_titled(text: str, word: str) -> Step:
+    found = [s for s in _steps(text) if word in s.title]
+    if len(found) != 1:
+        raise AssertionError(f"expected one step titled with {word!r}, found {[s.title for s in found]}")
+    return found[0]
+
+
+def _sentences(text: str) -> list[str]:
+    """Sentences and list items, with line wraps joined."""
+    out: list[str] = []
+    for block in re.split(r"\n\s*\n|\n(?=\s*(?:\d+\.|-) )", text):
+        joined = " ".join(line.strip() for line in block.splitlines()).strip()
+        out.extend(s for s in re.split(r"(?<=[.?!;])\s+", joined) if s)
+    return out
+
+
 class SkillTest(unittest.TestCase):
     def test_frontmatter_and_router(self) -> None:
         text = SKILL.read_text()
@@ -55,6 +95,39 @@ class SkillTest(unittest.TestCase):
         self.assertTrue(steps)
         self.assertEqual(len(headings), len(steps))
         self.assertEqual([int(step) for step in steps], list(range(1, len(steps) + 1)))
+
+    def test_finishing_vault_work_chains_to_a_step_that_asks_about_locking(self) -> None:
+        text = SKILL.read_text()
+        finish = _step_titled(text, "Finish")
+        chain = re.search(r"whenever you finish work that used a vault folder, run Step (\d+)", text)
+        self.assertIsNotNone(chain)
+        assert chain is not None
+        self.assertEqual(int(chain[1]), finish.number)
+        self.assertIn("as in Step 4", finish.body)
+        self.assertIn("Run `finvault status`", finish.body)
+        questions = [q for q in re.findall(r'"([^"]*)"', finish.body) if q.rstrip().endswith("?") or "?" in q]
+        self.assertTrue(any("locked now?" in q for q in questions), questions)
+        for field in ("terminals", "busy_processes", "--force"):
+            self.assertIn(field, finish.body)
+        self.assertRegex(finish.body, r"the human runs `finvault lock`")
+
+    def test_the_agent_only_ever_runs_finvault_status(self) -> None:
+        text = _strip_frontmatter(SKILL.read_text())
+        quoted = re.findall(r'"([^"]*)"', text)
+        for sentence in _sentences(re.sub(r'"[^"]*"', '""', text)):
+            for command in re.findall(r"`finvault ([a-z-]+)[^`]*`", sentence):
+                if command == "status":
+                    continue
+                with self.subTest(sentence=sentence):
+                    # Any other command is the human's to run, or named in a never-rule.
+                    self.assertRegex(sentence, r"(?i)\bhuman\b|\bthemselves\b|\bnever\b")
+                    self.assertNotRegex(sentence, r"^(\d+\.\s*)?Run `finvault (?!status)")
+        for speech in quoted:
+            with self.subTest(speech=speech):
+                self.assertNotRegex(speech, OFFER)
+
+    def test_the_skill_never_offers_to_lock(self) -> None:
+        self.assertNotRegex(SKILL.read_text(), OFFER)
 
     def test_command_examples_parse(self) -> None:
         commands = re.findall(r"`(finvault\s+[^`\n]+)`", SKILL.read_text())

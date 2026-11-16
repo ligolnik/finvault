@@ -1,11 +1,13 @@
 ---
 name: finvault
-description: Use on a Mac with a finvault vault when the user mentions a vault, locked folder, finvault, mode 000, folder is empty, or permission denied in a vault folder. Protect locked mountpoints and interpret status for the human.
+description: Use on a Mac with a finvault vault when the user mentions a vault, locked folder, finvault, mode 000, folder is empty, or permission denied in a vault folder, and whenever you finish work that used a vault folder. Protect locked mountpoints, interpret status for the human, and ask whether to lock when vault work is done.
 ---
 
 # Working beside a finvault vault
 
 This skill is an action router — pick the step that matches the user's intent and execute only that step. Do not run other steps; do not parallelize.
+
+One chain is required: whenever you finish work that used a vault folder, run Step 7 before your final reply, even if no step was picked for that work.
 
 ## Step 1 — Recognise a vault folder
 
@@ -71,3 +73,17 @@ Any suggested retry is for the human, including code 5.
 Leave `<path>.plain` original copies, the configured state folder (`<state_dir>`),
 and the sweep archive inside the vault alone. Do not read, edit, move, delete,
 clean up, or use them to bypass a locked folder. Ask the human to manage them.
+
+## Step 7 — Finish work that used the vault
+
+Run this before your final reply whenever the work you just did read or wrote a vault folder.
+1. Leave every vault folder and close what you own there, as in Step 4: move your shell's working
+   directory outside every vault folder and close files, handles and tools you started that use it.
+2. Run `finvault status`.
+3. End your reply by asking the human whether the vault should be locked now, for example:
+   "I'm done with the vault folders. Should the vault be locked now? If so, run `finvault lock`."
+   Name every terminal in `terminals` and any `busy_processes` count above zero: they would make
+   `finvault lock` refuse, and a human-run `finvault lock --force` would end those terminals.
+   If `history_holders` or `warnings` are not empty, relay them too.
+4. If the human says yes, the human runs `finvault lock`. You still never run lock yourself, with or
+   without `--force` or `--skip-sweep`. Ask the question; never phrase it as an offer to lock for them.

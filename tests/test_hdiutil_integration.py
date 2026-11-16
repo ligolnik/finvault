@@ -23,6 +23,12 @@ from finvault.platform import MacPlatform, Terminal
 from tests.helpers import TempDirTest, fake_deps, make_config
 
 
+def _spotlight_processes() -> list[str]:
+    """Spotlight processes running now, for the failure message (ps lists other users' processes)."""
+    ps = subprocess.run(["ps", "-axo", "pid=,user=,comm="], capture_output=True, text=True, check=False)
+    return [row.strip() for row in ps.stdout.splitlines() if "/md" in row or " md" in row]
+
+
 def _skip_reason() -> str:
     if sys.platform != "darwin" or shutil.which("hdiutil") is None:
         return "needs macOS hdiutil"
@@ -133,9 +139,9 @@ class HdiutilIntegrationTest(TempDirTest):
                 time.sleep(0.05)
         self.platform.terminals = []
 
-        for _ in range(5):
+        for cycle in range(5):
             out = vault.lock(cfg, deps)
-            self.assertEqual(out.exit_code, 0, out.data)
+            self.assertEqual(out.exit_code, 0, {"cycle": cycle, "lock": out.data, "spotlight": _spotlight_processes()})
             self.assertFalse(os.path.ismount(docs))
             self.assertEqual(os.stat(docs).st_mode & 0o777, 0o000)
             with self.assertRaises(PermissionError):

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3 — 2026-11-16
+
+### Changed
+
+- Licensed under the Apache License 2.0 (`LICENSE`, `license = "Apache-2.0"` in `pyproject.toml`).
+
 ## 0.1.2 — 2026-11-16
 
 ### Fixed

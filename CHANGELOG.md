@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.7 — 2026-11-16
+
+### Fixed
+
+- `lock` could leave a closed folder at mode 700 instead of 000. It set mode 000 only on folders `hdiutil info` no longer listed, and skipped the rest silently. Seen once on CI right after the 0.1.6 merge (`test_full_lifecycle`, run 43897752487) and not reproduced locally in 25 attach/detach cycles. `lock` now polls `hdiutil info` for up to 5 s until the closed images leave it, and a folder that still can't be set to 000 is listed under `not_mode_000` with exit 1. The integration test now checks `lock`'s exit code and prints its output on failure.
+
 ## 0.1.6 — 2026-11-16
 
 ### Fixed

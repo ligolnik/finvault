@@ -13,12 +13,21 @@ import os
 import re
 import shutil
 import stat
+import tempfile
 from dataclasses import dataclass, field
 
 from finvault.config import SweepSettings
 from finvault.errors import ConcurrentChangeError, FinvaultError
 from finvault.jsonutil import as_dict
-from finvault.pathutil import append_fsync, ensure_dir_inside, fsync_dir, is_under, is_under_any, write_temp_beside
+from finvault.pathutil import (
+    append_fsync,
+    ensure_dir_inside,
+    fsync_dir,
+    is_under,
+    is_under_any,
+    trim_partial_line,
+    write_temp_beside,
+)
 
 HASH_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 SESSION_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
@@ -197,6 +206,7 @@ class SweepPlan:
     file_history: list[str] = field(default_factory=list[str])
     scratch: list[str] = field(default_factory=list[str])
     unreadable_projects: list[str] = field(default_factory=list[str])
+    problems: list[str] = field(default_factory=list[str])
 
     def counts(self) -> dict[str, object]:
         return {
@@ -205,10 +215,15 @@ class SweepPlan:
             "file_history_folders": len(self.file_history),
             "scratch_folders": len(self.scratch),
             "unreadable_project_folders": len(self.unreadable_projects),
+            "problems": list(self.problems),
         }
 
     def is_empty(self) -> bool:
         return not (self.vaulted or self.pastes or self.file_history or self.scratch)
+
+    def is_complete(self) -> bool:
+        """False when part of what the sweep must check could not be checked."""
+        return not self.problems
 
 
 def expand_roots(paths: tuple[str, ...]) -> tuple[str, ...]:
@@ -240,12 +255,19 @@ def plan_sweep(settings: SweepSettings, vault_paths: tuple[str, ...], archive_di
     stamp = file_stamp(settings.history)
     plan = SweepPlan(history_path=settings.history, history_stamp=stamp)
     if stamp is not None:
+        links = os.lstat(settings.history).st_nlink
+        if links > 1:
+            plan.problems.append(
+                f"{settings.history} has {links} hard links; another name for it would keep the swept lines"
+            )
         with open(settings.history, "rb") as fh:
             lines = split_lines(fh.read())
         if file_stamp(settings.history) != stamp:
             raise ConcurrentChangeError(settings.history)
         plan.kept, plan.vaulted = split_history(lines, roots)
     wanted = pastes_to_move(plan.kept, plan.vaulted + read_archived_lines(archive_dir))
+    if wanted and _list(settings.paste_cache) is None:
+        plan.problems.append(f"can't read {settings.paste_cache}")
     plan.pastes = sorted(h for h in wanted if os.path.isfile(os.path.join(settings.paste_cache, f"{h}.txt")))
 
     session_ids: set[str] = set()
@@ -255,18 +277,32 @@ def plan_sweep(settings: SweepSettings, vault_paths: tuple[str, ...], archive_di
         names = _list(root)
         if names is None:
             plan.unreadable_projects.append(root)
+            plan.problems.append(f"can't read {root}, so its sessions' file-history can't be found")
             continue
         session_ids |= session_ids_from_names(names)
-    fh_names = _list(settings.file_history) or []
-    plan.file_history = [
-        n for n in file_history_to_move(fh_names, session_ids) if os.path.isdir(os.path.join(settings.file_history, n))
-    ]
+    fh_names = _list(settings.file_history)
+    if fh_names is None:
+        plan.problems.append(f"can't read {settings.file_history}")
+    for name in file_history_to_move(fh_names or [], session_ids):
+        entry = os.path.join(settings.file_history, name)
+        mode = os.lstat(entry).st_mode
+        if stat.S_ISLNK(mode):
+            plan.problems.append(f"{entry} is a symlink; finvault won't follow it out of {settings.file_history}")
+        elif stat.S_ISDIR(mode):
+            plan.file_history.append(name)
 
-    scratch_names = _list(settings.scratch_root) or []
+    scratch_names = _list(settings.scratch_root)
+    if scratch_names is None:
+        plan.problems.append(f"can't read {settings.scratch_root}")
     plan.scratch = [
-        os.path.join(settings.scratch_root, n) for n in scratch_matches(scratch_names, settings.scratch_globs)
+        os.path.join(settings.scratch_root, n) for n in scratch_matches(scratch_names or [], settings.scratch_globs)
     ]
     return plan
+
+
+def vaulted_history_lines(settings: SweepSettings, vault_paths: tuple[str, ...]) -> int:
+    """How many lines in the shared history belong to the vault right now."""
+    return len(split_history(read_lines(settings.history), expand_roots(vault_paths))[1])
 
 
 def _free_name(dst: str) -> str:
@@ -291,26 +327,89 @@ def _same_content(a: str, b: str) -> bool:
                 return True
 
 
-def move_file(src: str, dst: str, root: str) -> str:
-    """Move one file into the vault below ``root``; an existing different file is kept beside it."""
-    ensure_dir_inside(os.path.dirname(dst), root, DIR_MODE)
-    if os.path.lexists(dst):
-        if _same_content(src, dst):
-            os.unlink(src)
-            return dst
-        dst = _free_name(dst)
-    if os.path.islink(src):
-        os.symlink(os.readlink(src), dst)
-    else:
-        shutil.copy2(src, dst)
-        with open(dst, "rb") as fh:
-            os.fsync(fh.fileno())
+def _identity(st: os.stat_result) -> tuple[int, ...]:
+    # ctime moves on every write and can't be set back, unlike mtime.
+    return (st.st_ino, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def _unlink_unchanged(src: str, before: os.stat_result) -> None:
+    """Delete ``src`` only if nothing wrote to it since ``before``; otherwise keep it for a later pass."""
+    if _identity(os.lstat(src)) != _identity(before):
+        raise ConcurrentChangeError(src)
     os.unlink(src)
-    return dst
+
+
+def _link_in(tmp: str, dst: str) -> str:
+    """Give ``tmp`` the name ``dst`` (or a free ``dst.N``), never replacing or following an entry."""
+    target = dst
+    while True:
+        try:
+            os.link(tmp, target)
+            return target
+        except FileExistsError:
+            target = _free_name(dst)
+
+
+def _copy_in(src: str, dst: str, before: os.stat_result) -> str:
+    """Copy regular file ``src`` into a new private file and link it in at ``dst``."""
+    folder = os.path.dirname(dst)
+    src_fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(src_fd, "rb") as inp:
+        if _identity(os.fstat(inp.fileno())) != _identity(before):
+            raise ConcurrentChangeError(src)
+        fd, tmp = tempfile.mkstemp(prefix=".finvault-", suffix=".tmp", dir=folder)
+        try:
+            with os.fdopen(fd, "wb") as out:
+                shutil.copyfileobj(inp, out, 1 << 20)
+                out.flush()
+                os.fchmod(out.fileno(), stat.S_IMODE(before.st_mode))
+                os.fsync(out.fileno())
+            os.utime(tmp, ns=(before.st_atime_ns, before.st_mtime_ns))
+            return _link_in(tmp, dst)
+        finally:
+            os.unlink(tmp)
+
+
+def _symlink_in(link: str, dst: str) -> str:
+    target = dst
+    while True:
+        try:
+            os.symlink(link, target)
+            return target
+        except FileExistsError:
+            if os.path.islink(target) and os.readlink(target) == link:
+                return target
+            target = _free_name(dst)
+
+
+def move_file(src: str, dst: str, root: str) -> str:
+    """Move one file into the vault below ``root``; an existing different file is kept beside it.
+
+    The copy is written to a new private file and linked in, so an entry put
+    at ``dst`` meanwhile is never replaced or followed. ``src`` is deleted only
+    after the copy's folder entry is on disk and only if ``src`` is unchanged.
+    """
+    folder = os.path.dirname(dst)
+    ensure_dir_inside(folder, root, DIR_MODE)
+    before = os.lstat(src)
+    if os.path.lexists(dst) and _same_content(src, dst):
+        _unlink_unchanged(src, before)
+        return dst
+    if stat.S_ISLNK(before.st_mode):
+        placed = _symlink_in(os.readlink(src), dst)
+    elif stat.S_ISREG(before.st_mode):
+        placed = _copy_in(src, dst, before)
+    else:
+        raise FinvaultError(f"{src} is not a regular file or symlink", "move or delete it by hand, then lock again")
+    fsync_dir(folder)
+    _unlink_unchanged(src, before)
+    return placed
 
 
 def move_tree(src: str, dst: str, root: str) -> int:
     """Move a folder into the vault below ``root`` file by file, merging with what is there."""
+    if os.path.islink(src) or not os.path.isdir(src):
+        raise FinvaultError(f"{src} is a symlink or not a folder", "finvault won't follow it; move it by hand")
     moved = 0
     for dirpath, dirnames, filenames in os.walk(src, topdown=True, followlinks=False):
         rel = os.path.relpath(dirpath, src)
@@ -364,6 +463,9 @@ def _commit_history(
     without locking, so a line can still land on the old file between that check
     and the rename: it is read back from the old file and split again, vaulted
     lines to the archive and the rest onto the new history.
+
+    The tail is read before anything else can fail, so a failed folder sync
+    still saves the late lines before the error is raised.
     """
     mode = stat.S_IMODE(os.stat(path).st_mode)
     tmp = write_temp_beside(path, new_content, mode)
@@ -379,23 +481,33 @@ def _commit_history(
             st = os.fstat(old_fd)
             if (st.st_size, st.st_mtime_ns, st.st_ino) != stamp or file_stamp(path) != stamp:
                 raise ConcurrentChangeError(path)
+            if st.st_nlink > 1:
+                raise FinvaultError(
+                    f"{path} has {st.st_nlink} hard links; another name for it would keep the swept lines",
+                    "remove the other names for the file, then run the command again",
+                )
             os.replace(tmp, path)
             committed = True
-            fsync_dir(os.path.dirname(path))
             tail = _read_tail(old_fd, stamp[0])
         finally:
             os.close(old_fd)
     finally:
         if not committed and os.path.exists(tmp):
             os.unlink(tmp)
-    if not tail:
-        return 0
+    sync_error: OSError | None = None
+    try:
+        fsync_dir(os.path.dirname(path))
+    except OSError as exc:
+        sync_error = exc
     late = split_lines(tail)
-    late_kept, late_vaulted = split_history(late, roots)
-    if late_vaulted:
-        append_fsync(archive_file, b"".join(new_archive_lines(read_lines(archive_file), late_vaulted)), FILE_MODE)
-    if late_kept:
-        append_fsync(path, b"".join(late_kept), mode)
+    if late:
+        late_kept, late_vaulted = split_history(late, roots)
+        if late_vaulted:
+            append_fsync(archive_file, b"".join(new_archive_lines(read_lines(archive_file), late_vaulted)), FILE_MODE)
+        if late_kept:
+            append_fsync(path, b"".join(late_kept), mode)
+    if sync_error is not None:
+        raise sync_error
     return len(late)
 
 
@@ -413,8 +525,16 @@ def apply_sweep(
     """Carry out a plan. History goes first: if it changed, nothing else moves.
 
     Everything is written below ``archive_dir``, which must sit inside the
-    unlocked ``vault_root`` with no symlink on the way.
+    unlocked ``vault_root`` with no symlink on the way. A plan that could not
+    check everything is refused: moving part of the traces would let ``lock``
+    report a clean vault.
     """
+    if not plan.is_complete():
+        raise FinvaultError(
+            "the sweep can't check everything it must move: " + "; ".join(plan.problems),
+            "fix each problem listed (or use lock --skip-sweep to close without sweeping), then run it again",
+            details={"problems": list(plan.problems)},
+        )
     report = dict(plan.counts())
     if plan.is_empty():
         return report
@@ -427,6 +547,9 @@ def apply_sweep(
                 "finvault keeps swept data only inside the vault; move it away and run the command again",
             )
     archive_file = os.path.join(archive_dir, ARCHIVE_HISTORY)
+    trimmed = trim_partial_line(archive_file)
+    if trimmed:
+        report["archive_partial_bytes_trimmed"] = trimmed
     if plan.vaulted and plan.history_stamp is not None:
         add = new_archive_lines(read_lines(archive_file), plan.vaulted)
         late = _commit_history(
@@ -458,6 +581,7 @@ def apply_sweep(
 def restore_history(settings: SweepSettings, archive_dir: str) -> dict[str, object]:
     """Merge archived history lines back and copy back missing paste files."""
     archive_file = os.path.join(archive_dir, ARCHIVE_HISTORY)
+    trim_partial_line(archive_file)
     archived = read_lines(archive_file)
     stamp = file_stamp(settings.history)
     current = read_lines(settings.history) if stamp is not None else []

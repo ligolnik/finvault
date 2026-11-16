@@ -7,6 +7,7 @@ import os
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
+from typing import BinaryIO
 from unittest import mock
 
 from finvault import sweep as sw
@@ -137,6 +138,7 @@ class SweepFilesTest(TempDirTest):
                 "file_history_folders": 1,
                 "scratch_folders": 1,
                 "unreadable_project_folders": 0,
+                "problems": [],
             },
         )
         self.assertEqual(Path(s.history).read_bytes(), before)
@@ -198,6 +200,93 @@ class SweepFilesTest(TempDirTest):
         plan = sw.plan_sweep(s, roots)
         self.assertEqual(plan.file_history, [])
         self.assertEqual(plan.unreadable_projects, [roots[1]])
+        self.assertFalse(plan.is_complete())
+        archive = os.path.join(roots[0], ".finvault-sweep")
+        with self.assertRaises(FinvaultError):
+            sw.apply_sweep(plan, s, archive, roots[0], roots)
+        self.assertFalse(os.path.exists(archive))
+
+    def check_unreadable_source_makes_the_plan_incomplete(self, folder: str) -> None:
+        s, roots, _lines = self.build()
+        path = str(getattr(s, folder))
+        os.chmod(path, 0o000)
+        try:
+            plan = sw.plan_sweep(s, roots)
+        finally:
+            os.chmod(path, 0o700)
+        self.assertFalse(plan.is_complete())
+        self.assertIn(path, plan.problems[0])
+
+    def test_unreadable_file_history_makes_the_plan_incomplete(self) -> None:
+        self.check_unreadable_source_makes_the_plan_incomplete("file_history")
+
+    def test_unreadable_scratch_root_makes_the_plan_incomplete(self) -> None:
+        self.check_unreadable_source_makes_the_plan_incomplete("scratch_root")
+
+    def test_history_with_a_second_hard_link_is_refused(self) -> None:
+        s, roots, lines = self.build()
+        os.link(s.history, self.path("history-alias"))
+        archive = os.path.join(roots[0], ".finvault-sweep")
+        plan = sw.plan_sweep(s, roots, archive)
+        self.assertFalse(plan.is_complete())
+        with self.assertRaises(FinvaultError):
+            sw.apply_sweep(plan, s, archive, roots[0], roots)
+        self.assertEqual(Path(s.history).read_bytes(), b"".join(lines))
+
+    def test_symlinked_file_history_session_is_refused_not_followed(self) -> None:
+        s, roots, _lines = self.build()
+        session = Path(s.file_history, "sess-a")
+        for child in session.iterdir():
+            child.unlink()
+        session.rmdir()
+        external = self.write("external-session/only-copy", "important")
+        os.symlink(os.path.dirname(external), session)
+        archive = os.path.join(roots[0], ".finvault-sweep")
+        plan = sw.plan_sweep(s, roots, archive)
+        self.assertEqual(plan.file_history, [])
+        self.assertIn("symlink", plan.problems[0])
+        with self.assertRaises(FinvaultError):
+            sw.move_tree(str(session), os.path.join(archive, "file-history", "sess-a"), roots[0])
+        self.assertEqual(Path(external).read_text(), "important")
+
+    def test_partial_archive_line_is_trimmed_before_the_retry(self) -> None:
+        s, roots, lines = self.build()
+        archive = os.path.join(roots[0], ".finvault-sweep")
+        real_append = sw.append_fsync
+
+        def partial(path: str, data: bytes, mode: int = 0o600) -> None:
+            real_append(path, data[:19], mode)
+            raise OSError(28, "No space left on device")
+
+        with mock.patch.object(sw, "append_fsync", side_effect=partial), self.assertRaises(OSError):
+            sw.apply_sweep(sw.plan_sweep(s, roots, archive), s, archive, roots[0], roots)
+        self.assertEqual(Path(s.history).read_bytes(), b"".join(lines))
+        report = sw.apply_sweep(sw.plan_sweep(s, roots, archive), s, archive, roots[0], roots)
+        self.assertEqual(report["archive_partial_bytes_trimmed"], 19)
+        self.assertEqual(Path(archive, "history.jsonl").read_bytes(), lines[1] + lines[2])
+        sw.restore_history(s, archive)
+        self.assertEqual(sorted(sw.read_lines(s.history)), sorted(lines))
+
+    def test_late_lines_are_saved_when_the_folder_sync_fails(self) -> None:
+        s, roots, lines = self.build()
+        archive = os.path.join(roots[0], ".finvault-sweep")
+        late = line("/elsewhere", 999, "late")
+        real_replace = os.replace
+
+        def race_then_replace(src: str, dst: str) -> None:
+            if dst == s.history:
+                with open(s.history, "ab") as fh:
+                    fh.write(late)
+            real_replace(src, dst)
+
+        plan = sw.plan_sweep(s, roots, archive)
+        with (
+            mock.patch.object(sw.os, "replace", side_effect=race_then_replace),
+            mock.patch.object(sw, "fsync_dir", side_effect=OSError(5, "Input/output error")),
+            self.assertRaises(OSError),
+        ):
+            sw.apply_sweep(plan, s, archive, roots[0], roots)
+        self.assertEqual(Path(s.history).read_bytes(), lines[0] + lines[3] + lines[4] + late)
 
     def test_restore_history_puts_lines_back_in_order(self) -> None:
         s, roots, lines = self.build()
@@ -311,6 +400,44 @@ class SweepFilesTest(TempDirTest):
         self.assertEqual(dst, self.path("b", "f.txt.1"))
         self.assertEqual(Path(self.path("b", "f.txt")).read_text(), "old")
         self.assertFalse(os.path.exists(src))
+
+    def test_move_file_keeps_a_source_written_during_the_copy(self) -> None:
+        src = self.write("a/backup", "first")
+        real_copy = sw.shutil.copyfileobj
+
+        def copy_then_append(fsrc: BinaryIO, fdst: BinaryIO, length: int = 0) -> None:
+            real_copy(fsrc, fdst, length)
+            with open(src, "a") as out:
+                out.write(" second")
+
+        os.makedirs(self.path("vault"))
+        with (
+            mock.patch.object(sw.shutil, "copyfileobj", side_effect=copy_then_append),
+            self.assertRaises(ConcurrentChangeError),
+        ):
+            sw.move_file(src, self.path("vault", "backup"), self.path("vault"))
+        self.assertEqual(Path(src).read_text(), "first second")
+        sw.move_file(src, self.path("vault", "backup"), self.path("vault"))
+        self.assertEqual(Path(self.path("vault", "backup.1")).read_text(), "first second")
+        self.assertFalse(os.path.exists(src))
+
+    def test_move_file_never_writes_through_a_symlink_put_at_the_destination(self) -> None:
+        src = self.write("a/paste", "secret")
+        outside = self.write("outside", "precious")
+        os.makedirs(self.path("vault"))
+        dst = self.path("vault", "paste")
+        real_mkstemp = sw.tempfile.mkstemp
+
+        def plant_then_mkstemp(prefix: str, suffix: str, dir: str) -> tuple[int, str]:
+            os.symlink(outside, dst)
+            return real_mkstemp(prefix=prefix, suffix=suffix, dir=dir)
+
+        with mock.patch.object(sw.tempfile, "mkstemp", side_effect=plant_then_mkstemp):
+            placed = sw.move_file(src, dst, self.path("vault"))
+        self.assertEqual(Path(outside).read_text(), "precious")
+        self.assertEqual(placed, dst + ".1")
+        self.assertEqual(Path(placed).read_text(), "secret")
+        self.assertEqual(sorted(os.listdir(self.path("vault"))), ["paste", "paste.1"])
 
 
 if __name__ == "__main__":

@@ -1,15 +1,20 @@
-"""Command-line entry point. JSON on stdout, diagnostics on stderr."""
+"""Command-line entry point.
+
+Plain text on stdout when it is a terminal, JSON when it is piped or captured
+(``--json``/``--text`` choose); diagnostics always go to stderr.
+"""
 
 from __future__ import annotations
 
 import argparse
 import getpass
 import json
+import os
 import sys
 import time
 from datetime import datetime
 
-from finvault import __version__, vault
+from finvault import __version__, render, vault
 from finvault.config import DEFAULT_CONFIG, load_config
 from finvault.errors import EXIT_OK, FinvaultError
 from finvault.platform import MacPlatform
@@ -55,11 +60,13 @@ def build_parser() -> argparse.ArgumentParser:
     config_help = f"vault config file (default {DEFAULT_CONFIG})"
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--config", default=argparse.SUPPRESS, help=config_help)
+    _add_output_flags(common, default=argparse.SUPPRESS)
     parser = argparse.ArgumentParser(
         prog="finvault",
         description="Keep folders in encrypted APFS sparse bundles, unlocked at their own paths.",
     )
     parser.add_argument("--config", default=None, help=config_help)
+    _add_output_flags(parser, default=None)
     parser.add_argument("--version", action="version", version=f"finvault {__version__}")
     sub = parser.add_subparsers(dest="command", required=True, metavar="<command>")
     p = sub.add_parser("init", parents=[common], help="create the encrypted image for a folder")
@@ -77,6 +84,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="only count what would move")
     sub.add_parser("restore-history", parents=[common], help="merge swept history lines back")
     return parser
+
+
+def _add_output_flags(parser: argparse.ArgumentParser, *, default: object) -> None:
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--json", dest="output", action="store_const", const="json", default=default,
+        help="print JSON (the default when stdout is not a terminal)",
+    )  # fmt: skip
+    group.add_argument(
+        "--text", dest="output", action="store_const", const="text", default=default,
+        help="print plain text (the default when stdout is a terminal)",
+    )  # fmt: skip
+
+
+def _emit(payload: dict[str, object], output: str | None) -> None:
+    mode = output or ("text" if sys.stdout.isatty() else "json")
+    if mode == "text":
+        sys.stdout.write(render.render(payload, os.path.expanduser("~")))
+    else:
+        print(json.dumps(payload, indent=2, sort_keys=True))
 
 
 def dispatch(args: argparse.Namespace, deps: vault.Deps) -> vault.Outcome:
@@ -113,10 +140,10 @@ def main(argv: list[str] | None = None, deps: vault.Deps | None = None) -> int:
         if exc.hint:
             print(f"finvault: what to do: {exc.hint}", file=sys.stderr)
         payload = {"ok": False, "command": args.command, "error": exc.message, "hint": exc.hint, **exc.details}
-        print(json.dumps(payload, indent=2, sort_keys=True))
+        _emit(payload, args.output)
         return exc.exit_code
     payload = {"ok": outcome.exit_code == EXIT_OK, "command": args.command, **outcome.data}
-    print(json.dumps(payload, indent=2, sort_keys=True))
+    _emit(payload, args.output)
     return outcome.exit_code
 
 

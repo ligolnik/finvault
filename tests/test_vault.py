@@ -437,6 +437,25 @@ class LockUnlockTest(VaultTestBase):
         self.assertEqual(out.data["written_while_locking"], {"file_history_folders": ["sess-a"]})
         self.assertEqual(platform.mounts, {})
 
+    def test_lock_is_not_clean_when_it_cant_check_backups_after_closing(self) -> None:
+        cfg, platform, deps = self.setup_vault()
+        assert cfg.sweep is not None
+        file_history = cfg.sweep.file_history
+        os.makedirs(file_history, exist_ok=True)
+        real_detach = platform.detach
+
+        def lock_backups_then_detach(device: str) -> None:
+            os.chmod(file_history, 0o000)
+            real_detach(device)
+
+        platform.detach = lock_backups_then_detach  # type: ignore[method-assign]  # inspection fails after close
+        try:
+            out = vault.lock(cfg, deps)
+        finally:
+            os.chmod(file_history, 0o700)
+        self.assertEqual(out.exit_code, 1)
+        self.assertEqual(out.data["written_while_locking"], {"unreadable": [file_history]})
+
     def test_verify_ignores_the_sweep_archive_written_after_migrate(self) -> None:
         cfg, _platform, deps = self.setup_vault()
         docs = cfg.folder("docs").path

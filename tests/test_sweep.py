@@ -440,6 +440,61 @@ class SweepFilesTest(TempDirTest):
         self.assertNotIn(late, sw.read_lines(s.history))
         self.assertIn(late, sw.read_lines(os.path.join(archive, "history.jsonl")))
 
+    def test_late_vaulted_line_reaches_the_archive_when_history_is_full(self) -> None:
+        s, roots, _lines = self.build()
+        archive = os.path.join(roots[0], ".finvault-sweep")
+        late_kept = line("/elsewhere", 998, "late, other project")
+        late_vaulted = line(roots[0], 999, "late, vault")
+        real_replace, real_append = os.replace, sw.append_fsync
+
+        def race_then_replace(src: str, dst: str) -> None:
+            if dst == s.history:
+                with open(s.history, "ab") as fh:
+                    fh.write(late_kept + late_vaulted)
+            real_replace(src, dst)
+
+        def history_full(path: str, data: bytes, mode: int = 0o600) -> None:
+            if path == s.history:
+                raise OSError(28, "No space left on device")
+            real_append(path, data, mode)
+
+        with (
+            mock.patch.object(sw.os, "replace", side_effect=race_then_replace),
+            mock.patch.object(sw, "append_fsync", side_effect=history_full),
+            self.assertRaises(OSError),
+        ):
+            sw.apply_sweep(sw.plan_sweep(s, roots, archive), s, archive, roots[0], roots)
+        self.assertIn(late_vaulted, sw.read_lines(os.path.join(archive, "history.jsonl")))
+
+    def test_a_leftover_paste_restore_temp_makes_the_plan_incomplete(self) -> None:
+        s, roots, _lines = self.build()
+        leftover = self.write("claude/paste-cache/.finvault-abc123.tmp", "vault paste")
+        plan = sw.plan_sweep(s, roots)
+        self.assertFalse(plan.is_complete())
+        self.assertTrue(any(leftover in p for p in plan.problems))
+
+    def test_move_file_keeps_the_source_when_the_existing_copy_changes_during_the_sync(self) -> None:
+        src = self.write("source", "ONLY ORIGINAL")
+        dst = self.write("vault/dest", "ONLY ORIGINAL")
+        real_sync = sw.fsync_dir
+
+        def sync_then_change(path: str) -> None:
+            real_sync(path)
+            Path(dst).write_text("replacement")
+
+        with mock.patch.object(sw, "fsync_dir", side_effect=sync_then_change), self.assertRaises(ConcurrentChangeError):
+            sw.move_file(src, dst, self.path("vault"))
+        self.assertEqual(Path(src).read_text(), "ONLY ORIGINAL")
+
+    def test_traces_left_reports_a_folder_it_cant_read(self) -> None:
+        s, roots, _lines = self.build()
+        os.chmod(s.file_history, 0o000)
+        try:
+            left = sw.traces_left(s, roots, {"sess-a"})
+        finally:
+            os.chmod(s.file_history, 0o700)
+        self.assertEqual(left["unreadable"], [s.file_history])
+
     def test_interrupted_restore_leaves_no_temp_file(self) -> None:
         s, roots, _lines = self.build()
         archive = os.path.join(roots[0], ".finvault-sweep")

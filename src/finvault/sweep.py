@@ -270,6 +270,10 @@ def plan_sweep(settings: SweepSettings, vault_paths: tuple[str, ...], archive_di
         f"{leftover} was left by an interrupted rewrite and may hold vault history; check it, then delete it"
         for leftover in _leftover_rewrites(settings.history)
     )
+    plan.problems.extend(
+        f"{leftover} was left by an interrupted paste restore and holds a vault paste; check it, then delete it"
+        for leftover in _leftover_temps(settings.paste_cache, ".finvault-")
+    )
     wanted = pastes_to_move(plan.kept, plan.vaulted + read_archived_lines(archive_dir))
     if wanted and _list(settings.paste_cache) is None:
         plan.problems.append(f"can't read {settings.paste_cache}")
@@ -324,11 +328,14 @@ def _hard_link_problems(path: str) -> list[str]:
     return []
 
 
+def _leftover_temps(folder: str, prefix: str) -> list[str]:
+    """Temp files named ``<prefix>*.tmp`` that a killed finvault left in ``folder``."""
+    return [os.path.join(folder, n) for n in _list(folder) or [] if n.startswith(prefix) and n.endswith(".tmp")]
+
+
 def _leftover_rewrites(history: str) -> list[str]:
     """Temp files a killed history rewrite left beside ``history`` (named by ``write_temp_beside``)."""
-    folder = os.path.dirname(history) or "."
-    prefix = f".{os.path.basename(history)}."
-    return [os.path.join(folder, n) for n in _list(folder) or [] if n.startswith(prefix) and n.endswith(".tmp")]
+    return _leftover_temps(os.path.dirname(history) or ".", f".{os.path.basename(history)}.")
 
 
 def vaulted_history_lines(settings: SweepSettings, vault_paths: tuple[str, ...]) -> int:
@@ -346,12 +353,22 @@ def traces_left(settings: SweepSettings, vault_paths: tuple[str, ...], session_i
     lines = vaulted_history_lines(settings, vault_paths)
     if lines:
         out["history_lines"] = lines
-    backups = file_history_to_move(_list(settings.file_history) or [], session_ids)
+    unreadable: list[str] = []
+    fh_names = _list(settings.file_history)
+    if fh_names is None:
+        unreadable.append(settings.file_history)
+    backups = file_history_to_move(fh_names or [], session_ids)
     if backups:
         out["file_history_folders"] = backups
-    scratch = scratch_matches(_list(settings.scratch_root) or [], settings.scratch_globs)
+    scratch_names = _list(settings.scratch_root)
+    if scratch_names is None:
+        unreadable.append(settings.scratch_root)
+    scratch = scratch_matches(scratch_names or [], settings.scratch_globs)
     if scratch:
         out["scratch_folders"] = [os.path.join(settings.scratch_root, n) for n in scratch]
+    if unreadable:
+        # Can't tell what is there, so this is not a clean lock either.
+        out["unreadable"] = unreadable
     return out
 
 
@@ -448,10 +465,10 @@ def move_file(src: str, dst: str, root: str) -> str:
     if os.path.lexists(dst):
         dst_before = os.lstat(dst)
         if _same_content(src, dst):
+            fsync_dir(folder)
             # The copy already there counts only if it is still the one compared.
             if _identity(os.lstat(dst)) != _identity(dst_before):
                 raise ConcurrentChangeError(dst)
-            fsync_dir(folder)
             _unlink_unchanged(src, before)
             return dst
     if stat.S_ISLNK(before.st_mode):
@@ -553,29 +570,41 @@ def _commit_history(
     finally:
         if not committed and os.path.exists(tmp):
             os.unlink(tmp)
-    sync_error: OSError | None = None
+    failures: list[OSError] = []
     try:
         fsync_dir(os.path.dirname(path))
     except OSError as exc:
-        sync_error = exc
+        failures.append(exc)
     late = split_lines(tail)
     if late:
-        late_kept, late_vaulted = split_history(late, roots)
-        if late_kept:
-            append_fsync(path, b"".join(late_kept), mode)
-        if late_vaulted:
-            try:
-                append_fsync(
-                    archive_file, b"".join(new_archive_lines(read_lines(archive_file), late_vaulted)), FILE_MODE
-                )
-            except OSError:
-                # Memory holds the only copy: put the lines back where the next
-                # sweep finds them, then report the failure.
-                append_fsync(path, b"".join(late_vaulted), mode)
-                raise
-    if sync_error is not None:
-        raise sync_error
+        failures.extend(_save_late_lines(path, mode, archive_file, *split_history(late, roots)))
+    if failures:
+        raise failures[0]
     return len(late)
+
+
+def _save_late_lines(path: str, mode: int, archive_file: str, kept: list[bytes], vaulted: list[bytes]) -> list[OSError]:
+    """Write late lines where they belong, each destination tried on its own.
+
+    Memory holds the only copy, so a failure never stops the other write. Vaulted
+    lines that can't reach the archive go back into history for the next sweep.
+    """
+    failures: list[OSError] = []
+    if kept:
+        try:
+            append_fsync(path, b"".join(kept), mode)
+        except OSError as exc:
+            failures.append(exc)
+    if vaulted:
+        try:
+            append_fsync(archive_file, b"".join(new_archive_lines(read_lines(archive_file), vaulted)), FILE_MODE)
+        except OSError as exc:
+            failures.append(exc)
+            try:
+                append_fsync(path, b"".join(vaulted), mode)
+            except OSError as again:
+                failures.append(again)
+    return failures
 
 
 def read_lines(path: str) -> list[bytes]:

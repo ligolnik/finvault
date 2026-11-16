@@ -148,6 +148,27 @@ The archive folder must be a real folder inside the unlocked image: the sweep re
 - **Out of scope:** a process that can already write inside the unlocked vault can swap a folder in the sweep
   archive for a symlink while a file is being moved, and send that file outside the vault. Copies already elsewhere (cloud services, git remotes, email) are out of scope.
 
+## Agent skill
+
+[The finvault skill](skills/finvault/SKILL.md) helps an AI agent working on a Mac
+with a vault recognise locked folders, explain status, and leave unlocking and
+locking to the human. It is for vault users, not finvault development.
+
+To install it yourself, run the appropriate commands from this repository:
+
+```sh
+# Claude Code
+mkdir -p ~/.claude/skills
+cp -R skills/finvault ~/.claude/skills/
+# Codex
+mkdir -p ~/.codex/skills
+cp -R skills/finvault ~/.codex/skills/
+```
+
+Alternatively, symlink this repository's absolute `skills/finvault` path into the
+appropriate skills directory. Keep the skill outside the vault so it is available
+while locked. These are human installation steps; agents must not run them.
+
 ## Development
 
 ```sh

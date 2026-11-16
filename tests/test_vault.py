@@ -12,7 +12,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from finvault import cli, vault
-from finvault.config import Config
+from finvault.config import Config, Folder
 from finvault.errors import EXIT_BUSY, EXIT_MISMATCH, FinvaultError
 from finvault.platform import Process, Terminal
 from tests.helpers import FakePlatform, TempDirTest, fake_deps, make_config
@@ -416,6 +416,26 @@ class LockUnlockTest(VaultTestBase):
         self.assertEqual(out.exit_code, 0)
         self.assertEqual(len(checks), 2)
         self.assertEqual(Path(cfg.sweep.history).read_text(), "")
+
+    def test_lock_reports_a_backup_written_while_it_closed_the_images(self) -> None:
+        cfg, platform, deps = self.setup_vault()
+        assert cfg.sweep is not None
+        proj = self.path("claude", "projects", "session-vault")
+        self.write("claude/projects/session-vault/sess-a.jsonl", "{}\n")
+        cfg = replace(cfg, folders=(*cfg.folders, Folder("sessions", proj)))
+        vault.init(cfg, deps, "sessions")
+        vault.migrate(cfg, deps, "sessions")
+        real_detach = platform.detach
+
+        def write_then_detach(device: str) -> None:
+            self.write("claude/file-history/sess-a/backup", "LATE BACKUP")
+            real_detach(device)
+
+        platform.detach = write_then_detach  # type: ignore[method-assign]  # a writer races the close
+        out = vault.lock(cfg, deps)
+        self.assertEqual(out.exit_code, 1)
+        self.assertEqual(out.data["written_while_locking"], {"file_history_folders": ["sess-a"]})
+        self.assertEqual(platform.mounts, {})
 
     def test_verify_ignores_the_sweep_archive_written_after_migrate(self) -> None:
         cfg, _platform, deps = self.setup_vault()

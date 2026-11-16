@@ -494,6 +494,38 @@ class LockUnlockTest(VaultTestBase):
         self.assertEqual(out.exit_code, 1)
         self.assertEqual(out.data["not_mode_000"], ["docs"])
 
+    def busy_for(self, platform: FakePlatform, times: int) -> list[str]:
+        """Make ``platform.detach`` fail as busy ``times`` times per device, then work."""
+        real_detach = platform.detach
+        tries: list[str] = []
+
+        def busy_then_detach(device: str) -> None:
+            tries.append(device)
+            if tries.count(device) <= times:
+                raise FinvaultError(f"closing {device} failed: Resource busy", "", EXIT_BUSY)
+            real_detach(device)
+
+        platform.detach = busy_then_detach  # type: ignore[method-assign]  # macOS holds the volume briefly
+        return tries
+
+    def test_lock_retries_a_detach_that_is_briefly_busy(self) -> None:
+        cfg, platform, deps = self.setup_vault()
+        tries = self.busy_for(platform, 2)
+        out = vault.lock(cfg, deps)
+        self.assertEqual(out.exit_code, 0, out.data)
+        self.assertEqual(len(tries), 6)
+        self.assertEqual(platform.mounts, {})
+        for f in cfg.folders:
+            self.assertEqual(mode(f.path), 0o000)
+
+    def test_lock_reports_a_detach_that_stays_busy(self) -> None:
+        cfg, platform, deps = self.setup_vault()
+        tries = self.busy_for(platform, 99)
+        out = vault.lock(cfg, deps)
+        self.assertEqual(out.exit_code, 1)
+        self.assertEqual(len(tries), 2 * vault.DETACH_ATTEMPTS)
+        self.assertEqual(sorted(f["name"] for f in out.data["failed"]), ["docs", "notes"])  # type: ignore[union-attr, index]
+
     def test_verify_ignores_the_sweep_archive_written_after_migrate(self) -> None:
         cfg, _platform, deps = self.setup_vault()
         docs = cfg.folder("docs").path

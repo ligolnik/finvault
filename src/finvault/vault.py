@@ -40,6 +40,8 @@ KILL_POLL_SEC = 0.5
 SWEEP_ATTEMPTS = 3
 SWEEP_RETRY_SEC = 1.0
 DETACH_SETTLE_SEC = 5.0
+DETACH_ATTEMPTS = 5
+DETACH_RETRY_SEC = 1.0
 DETACH_POLL_SEC = 0.25
 HOLDER_CHECKS = 3
 HOLDER_RECHECK_SEC = 0.2
@@ -138,14 +140,26 @@ def _is_empty_dir(path: str) -> bool:
 
 
 def _detach_image(cfg: Config, deps: Deps, image: str) -> None:
-    """Close one image, looking up its current device by image path first."""
+    """Close one image, looking up its current device by image path first.
+
+    macOS can hold a volume for a moment after the last process using it
+    exits, so a busy detach is tried again (never forced: that could lose
+    writes still in flight).
+    """
     real = os.path.realpath(image)
-    for att in deps.platform.attached_images():
-        if att.image_path == real:
-            if att.device is None:
-                raise FinvaultError(f"can't find the device for {image}", "close it with Disk Utility")
+    for attempt in range(1, DETACH_ATTEMPTS + 1):
+        att = next((a for a in deps.platform.attached_images() if a.image_path == real), None)
+        if att is None:
+            return
+        if att.device is None:
+            raise FinvaultError(f"can't find the device for {image}", "close it with Disk Utility")
+        try:
             deps.platform.detach(att.device)
             return
+        except FinvaultError as exc:
+            if exc.exit_code != EXIT_BUSY or attempt == DETACH_ATTEMPTS:
+                raise
+            deps.sleep(DETACH_RETRY_SEC)
 
 
 def _parse_size(size: str) -> int:

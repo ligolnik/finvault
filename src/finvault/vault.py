@@ -264,6 +264,12 @@ def migrate(cfg: Config, deps: Deps, name: str) -> Outcome:
         raise FinvaultError(f"{plain} already exists", "migrate stopped earlier; see the rollback steps in the README")
     if os.path.lexists(os.path.join(src, mf.MANIFEST_DIR)):
         raise FinvaultError(f"{src} contains {mf.MANIFEST_DIR}", "that name is reserved for finvault's checksum list")
+    for reserved in _manifest_excludes(cfg, folder):
+        if os.path.lexists(os.path.join(src, reserved)):
+            raise FinvaultError(
+                f"{src} contains {reserved}, the sweep archive_subdir",
+                "rename that entry, or set a different [sweep] archive_subdir in the config",
+            )
     _require_idle(deps, src, recursive=True)
     pw = deps.ask_passphrase()
     if not deps.platform.check_passphrase(image, pw):
@@ -623,8 +629,9 @@ def verify(cfg: Config, deps: Deps) -> Outcome:
             results.append({"name": f.name, "result": "locked, not checked"})
             continue
         checked += 1
-        expected = mf.load_manifest(f.path)
-        actual = mf.build_manifest(f.path, volume_root=True, exclude=_manifest_excludes(cfg, f))
+        excludes = _manifest_excludes(cfg, f)
+        expected = mf.load_manifest(f.path).without(excludes)
+        actual = mf.build_manifest(f.path, volume_root=True, exclude=excludes)
         diff = mf.compare(expected, actual)
         results.append({"name": f.name, "result": "ok" if diff.ok() else "differs", **diff.summary()})
         bad = bad or not diff.ok()

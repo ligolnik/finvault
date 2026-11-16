@@ -201,8 +201,8 @@ def match_terminals(
     """The terminals the busy processes descend from, in hc ls order.
 
     hc reports the folder a terminal started in, not where it is now, so this
-    goes by process ancestry, never by cwd. The terminal finvault itself runs in
-    is marked ``is_self`` so it is never ended.
+    goes by process ancestry, never by cwd. Every terminal finvault itself runs
+    under, however deeply nested, is marked ``is_self`` so it is never ended.
     """
     by_pid: dict[int, Terminal] = {}
     for t in terminals:
@@ -213,12 +213,21 @@ def match_terminals(
         t = owning_terminal(pid, parents, by_pid)
         if t is not None:
             owned.setdefault(t.address, []).append(pid)
-    own = owning_terminal(self_pid, parents, by_pid)
-    return [
-        BusyTerminal(t, tuple(owned[t.address]), own is not None and own.address == t.address)
-        for t in terminals
-        if t.address in owned
-    ]
+    own = self_terminals(self_pid, parents, by_pid)
+    return [BusyTerminal(t, tuple(owned[t.address]), t.address in own) for t in terminals if t.address in owned]
+
+
+def self_terminals(self_pid: int, parents: dict[int, int], by_pid: dict[int, Terminal]) -> set[str]:
+    """Every terminal on finvault's own ancestry, nearest and outer ones alike."""
+    found: set[str] = set()
+    seen: set[int] = set()
+    cur = self_pid
+    while cur > 1 and cur not in seen:
+        if cur in by_pid:
+            found.add(by_pid[cur].address)
+        seen.add(cur)
+        cur = parents.get(cur, 0)
+    return found
 
 
 def size_mb(nbytes: int) -> int:

@@ -98,6 +98,11 @@ class ParserTest(unittest.TestCase):
             [("t2", (42,), True), ("t1", (500,), False), ("t3", (77,), False)],
         )
 
+    def test_every_terminal_finvault_runs_under_is_self(self) -> None:
+        terms = [Terminal("outer", "/x", pids=(100,)), Terminal("inner", "/x", pids=(200,))]
+        got = match_terminals([100, 200], {300: 200, 200: 100, 100: 1}, terms, self_pid=300)
+        self.assertEqual([(b.terminal.address, b.is_self) for b in got], [("outer", True), ("inner", True)])
+
     def test_size_mb_rounds_up(self) -> None:
         self.assertEqual(size_mb(0), 1)
         self.assertEqual(size_mb(1 << 20), 1)

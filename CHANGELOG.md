@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.4 — 2026-11-16
+
+### Fixed
+
+Findings from an adversarial Codex review of 0.1.3, each with a regression test.
+
+- `lock` closed the vault after a sweep that could not read a projects, `file-history`, `paste-cache` or scratch folder, leaving those traces outside. The sweep now lists such sources under `problems`, and `lock` refuses to close anything until they are fixed (or `--skip-sweep` is used).
+- A `file-history` session that was a symlink was followed, moving files from elsewhere into the vault. It is now refused, never followed.
+- A `history.jsonl` with a second hard link kept its old lines under the other name after a sweep. It is now refused.
+- A full disk part way through an archive append left half a line that the retry glued onto the next one. The partial line is now cut before every append and before `restore-history`.
+- A failed folder sync right after the history rename lost lines appended during the rename. They are now read back and saved before the error is raised.
+- Moving a paste or backup copied through a symlink placed at the destination, and deleted a source written to during the copy. Files are now copied into a new private file and linked in without replacing or following anything, and the source is deleted only if it is unchanged.
+- `lock` could report success when a session wrote vault history while the images closed. It now checks again after closing and exits `1` with `history_lines_written_while_locking`.
+- `init` and `archive` accepted a different passphrase when every image was unlocked. The passphrase is now checked against an unlocked image too: `hdiutil imageinfo` answers "Authentication error" for a wrong passphrase and "Resource temporarily unavailable" for the right one on an image in use.
+- The checksum list skipped folders it could not read, so `verify` could pass on an incomplete copy. Unreadable folders now fail `migrate`, `archive` and `verify`.
+- `lock --force` protected only the nearest terminal `finvault` runs under. Every terminal on its process ancestry is now `self`.
+
 ## 0.1.3 — 2026-11-16
 
 ### Changed

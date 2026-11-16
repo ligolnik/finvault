@@ -101,6 +101,9 @@ class HdiutilIntegrationTest(TempDirTest):
         self.assertEqual(Path(docs + ".plain", "secret.txt").read_text(), "marker-a\n")
         vault.migrate(cfg, deps, "notes")
         self.assertEqual(vault.verify(cfg, deps).exit_code, 0)
+        # With every image attached, the passphrase is still checked against one of them.
+        self.assertTrue(self.platform.check_passphrase(image, "integration passphrase a"))
+        self.assertFalse(self.platform.check_passphrase(image, "not the passphrase"))
 
         # lock refuses while another process works in the vault, and names the terminal it
         # runs under: a shell (the "terminal", started elsewhere) whose child sits in the vault.

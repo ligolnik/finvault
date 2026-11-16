@@ -148,6 +148,21 @@ class PassphraseTransportTest(unittest.TestCase):
         self.assertIn("wrong passphrase", ctx.exception.message)
         self.assertNotIn(SECRET, str(ctx.exception))
 
+    def test_passphrase_check_reads_hdiutils_answer_for_attached_images(self) -> None:
+        cases = [
+            (0, b"", True),
+            (1, b"hdiutil: imageinfo failed - Authentication error", False),
+            (1, b"hdiutil: imageinfo failed - Resource temporarily unavailable", True),
+        ]
+        for code, err, want in cases:
+            with self.subTest(err=err):
+                done = subprocess.CompletedProcess(args=[], returncode=code, stdout=b"", stderr=err)
+                with mock.patch("finvault.platform.subprocess.run", return_value=done):
+                    self.assertIs(MacPlatform().check_passphrase("/v/i.sparsebundle", SECRET), want)
+        other = subprocess.CompletedProcess(args=[], returncode=1, stdout=b"", stderr=b"hdiutil: no such file")
+        with mock.patch("finvault.platform.subprocess.run", return_value=other), self.assertRaises(FinvaultError):
+            MacPlatform().check_passphrase("/v/i.sparsebundle", SECRET)
+
     def test_empty_passphrase_is_refused_before_running_anything(self) -> None:
         with mock.patch("finvault.platform.subprocess.run") as run, self.assertRaises(FinvaultError):
             MacPlatform().attach("/v/i.sparsebundle", "/work/Docs", "")

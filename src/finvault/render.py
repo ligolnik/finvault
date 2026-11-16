@@ -11,11 +11,12 @@ from collections.abc import Callable
 from finvault.jsonutil import as_dict, as_list
 
 Lines = list[str]
+# What the sweep moves into the vault. Scratch folders are deleted, never moved,
+# so they are reported on a line of their own.
 COUNT_NAMES = (
     ("history_lines", "history line"),
     ("paste_files", "paste file"),
     ("file_history_folders", "file-history folder"),
-    ("scratch_folders", "scratch folder"),
 )
 
 
@@ -63,6 +64,18 @@ def _int(value: object) -> int:
 def _counts(counts: dict[str, object]) -> str:
     """'2 history lines, 1 paste file', or '' when every count is zero."""
     return ", ".join(_plural(_int(counts.get(key)), word) for key, word in COUNT_NAMES if _int(counts.get(key)))
+
+
+def _sweep_lines(counts: dict[str, object], moved: str, deleted: str, nothing: str) -> Lines:
+    """What a sweep moves and what it deletes, each on its own line."""
+    out: Lines = []
+    archived = _counts(counts)
+    if archived:
+        out.append(f"{moved}: {archived}")
+    scratch = _int(counts.get("scratch_folders"))
+    if scratch:
+        out.append(f"{deleted}: {_plural(scratch, 'scratch folder')} (not kept)")
+    return out or [nothing]
 
 
 def _reasons(title: str, items: list[dict[str, object]]) -> Lines:
@@ -152,8 +165,7 @@ def _status(payload: dict[str, object], view: _View) -> Lines:
         if "error" in pending:
             out.append(f"Sweep: {pending['error']}")
         else:
-            waiting = _counts(pending)
-            out.append(f"Waiting to be swept: {waiting}" if waiting else "Sweep: nothing waiting")
+            out += _sweep_lines(pending, "Waiting to be swept", "Waiting to be deleted", "Sweep: nothing waiting")
             out += _problems(pending.get("problems"))
     out += [f"Warning: {w}" for w in _strs(payload.get("warnings"))]
     return out
@@ -171,8 +183,7 @@ def _lock(payload: dict[str, object], view: _View) -> Lines:
         out.append("Nothing to lock")
     sweep = as_dict(payload.get("sweep"))
     if sweep is not None:
-        moved = _counts(sweep)
-        out.append(f"Swept into the vault: {moved}" if moved else "Sweep: nothing to move")
+        out += _sweep_lines(sweep, "Swept into the vault", "Deleted", "Sweep: nothing to move")
     killed = _strs(payload.get("killed"))
     if killed:
         out.append(f"Ended terminals: {', '.join(killed)}")
@@ -237,11 +248,10 @@ def _verify(payload: dict[str, object], view: _View) -> Lines:
 
 
 def _sweep(payload: dict[str, object], view: _View) -> Lines:
-    moved = _counts(payload)
     if payload.get("dry_run") is True:
-        out = [f"Would move into the vault: {moved}" if moved else "Nothing to sweep"]
+        out = _sweep_lines(payload, "Would move into the vault", "Would delete", "Nothing to sweep")
     else:
-        out = [f"Moved into the vault: {moved}" if moved else "Nothing to sweep"]
+        out = _sweep_lines(payload, "Moved into the vault", "Deleted", "Nothing to sweep")
     return out + _problems(payload.get("problems"))
 
 

@@ -265,6 +265,38 @@ class RenderTest(unittest.TestCase):
             ],
         )
 
+    def test_scratch_folders_are_reported_as_deleted_not_moved(self) -> None:
+        counts: dict[str, object] = {
+            "history_lines": 1,
+            "paste_files": 0,
+            "file_history_folders": 0,
+            "scratch_folders": 2,
+            "problems": [],
+        }
+        dry = text({"ok": True, "command": "sweep", "dry_run": True, **counts}).splitlines()
+        self.assertEqual(
+            dry, ["Would move into the vault: 1 history line", "Would delete: 2 scratch folders (not kept)"]
+        )
+        only_scratch = {**counts, "history_lines": 0}
+        done = text({"ok": True, "command": "sweep", "dry_run": False, **only_scratch}).splitlines()
+        self.assertEqual(done, ["Deleted: 2 scratch folders (not kept)"])
+        lock = text({"ok": True, "command": "lock", "locked": ["docs"], "sweep": only_scratch, "failed": []})
+        self.assertIn("Deleted: 2 scratch folders (not kept)", lock)
+        self.assertNotIn("into the vault", lock)
+        status = text(
+            {
+                "ok": True,
+                "command": "status",
+                "folders": [],
+                "terminals": None,
+                "history_holders": None,
+                "warnings": [],
+                "sweep_pending": only_scratch,
+            }
+        )
+        self.assertIn("Waiting to be deleted: 2 scratch folders (not kept)", status)
+        self.assertNotIn("Waiting to be swept", status)
+
     def test_errors_show_only_the_details_stderr_lacks(self) -> None:
         busy = text(
             {

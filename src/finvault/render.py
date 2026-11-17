@@ -20,8 +20,34 @@ COUNT_NAMES = (
 )
 
 
+# Bidirectional formatting characters can make text display in a different order.
+BIDI = frozenset("\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+
+
+def clean(text: str) -> str:
+    """``text`` with control and bidi characters shown as escapes, safe to print on a terminal.
+
+    Paths, process names and terminal labels come from outside finvault; a
+    raw ESC, CR or newline in one could clear the screen or forge a line.
+    """
+    out: list[str] = []
+    for ch in text:
+        code = ord(ch)
+        if code < 0x20 or 0x7F <= code <= 0x9F:
+            out.append(f"\\x{code:02x}")
+        elif ch in BIDI:
+            out.append(f"\\u{code:04x}")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def render(payload: dict[str, object], home: str) -> str:
-    """The text for one command's payload (the JSON object the command prints)."""
+    """The text for one command's payload (the JSON object the command prints).
+
+    Every line is passed through ``clean``; the renderers never put a newline
+    inside a line, so the line breaks are all finvault's own.
+    """
     command = str(payload.get("command", ""))
     view = _View(home)
     if payload.get("ok") is False and "error" in payload:
@@ -29,7 +55,7 @@ def render(payload: dict[str, object], home: str) -> str:
     else:
         renderer = RENDERERS.get(command)
         lines = renderer(payload, view) if renderer else [f"{k}: {v}" for k, v in sorted(payload.items())]
-    return "\n".join(lines) + "\n" if lines else ""
+    return "\n".join(clean(line) for line in lines) + "\n" if lines else ""
 
 
 class _View:

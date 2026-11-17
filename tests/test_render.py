@@ -362,9 +362,54 @@ class OutputModeTest(unittest.TestCase):
         self.assertEqual(json.loads(self.run_cli(["--json", "sweep", "--dry-run"], tty=True))["dry_run"], True)
         self.assertEqual(self.run_cli(["sweep", "--dry-run", "--text"], tty=False), "Nothing to sweep\n")
 
-    def test_json_and_text_together_are_refused(self) -> None:
-        with redirect_stdout(io.StringIO()), mock.patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
-            cli.build_parser().parse_args(["status", "--json", "--text"])
+    def test_json_and_text_together_are_refused_on_either_side_of_the_command(self) -> None:
+        for argv in (
+            ["status", "--json", "--text"],
+            ["--json", "--text", "status"],
+            ["--json", "status", "--text"],
+            ["--text", "status", "--json"],
+        ):
+            with (
+                self.subTest(argv=argv),
+                redirect_stdout(io.StringIO()),
+                mock.patch("sys.stderr", io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                cli.build_parser().parse_args(argv)
+        self.assertEqual(cli.build_parser().parse_args(["--json", "status", "--json"]).output, "json")
+        self.assertEqual(cli.build_parser().parse_args(["--text", "status"]).output, "text")
+        self.assertIsNone(cli.build_parser().parse_args(["status"]).output)
+
+
+class TerminalSafetyTest(unittest.TestCase):
+    def test_control_and_bidi_characters_in_outside_data_are_escaped(self) -> None:
+        hostile = "/tmp/a\x1b[2J\x1b[HFORGED\rLocked: all\nWarning: none\u202egnp.exe\x9b"
+        out = text(
+            {
+                "ok": True,
+                "command": "status",
+                "folders": [
+                    {"name": "docs", "path": hostile, "image": True, "unlocked": False, "mountpoint_mode": "0o0"}
+                ],
+                "terminals": [{"address": "t1\x07", "where": "\x1b]0;title\x07", "busy_pids": [1], "self": False}],
+                "warnings": ["bad\x1b[31m"],
+            }
+        )
+        for raw in ("\x1b", "\r", "\x07", "\u202e", "\x9b"):
+            self.assertNotIn(raw, out)
+        self.assertEqual(len(out.splitlines()), 5)
+        self.assertIn("/tmp/a\\x1b[2J\\x1b[HFORGED\\x0dLocked: all\\x0aWarning: none\\u202egnp.exe\\x9b", out)
+
+    def test_ordinary_text_passes_through_unchanged(self) -> None:
+        self.assertEqual(
+            render.clean("~/Documents/Finances — Café 2026/ü.csv"), "~/Documents/Finances — Café 2026/ü.csv"
+        )
+
+    def test_stderr_diagnostics_are_escaped(self) -> None:
+        err = io.StringIO()
+        with mock.patch("sys.stderr", err):
+            cli._warn("x\x1b[2Jy")  # pyright: ignore[reportPrivateUsage]  # the stderr writer under test
+        self.assertEqual(err.getvalue(), "finvault: warning: x\\x1b[2Jy\n")
 
 
 if __name__ == "__main__":

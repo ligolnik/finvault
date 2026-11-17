@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import time
+from collections.abc import Sequence
 from datetime import datetime
 
 from finvault import __version__, render, vault
@@ -21,7 +22,7 @@ from finvault.platform import MacPlatform
 
 
 def _warn(message: str) -> None:
-    print(f"finvault: warning: {message}", file=sys.stderr)
+    print(f"finvault: warning: {render.clean(message)}", file=sys.stderr)
 
 
 def ask_passphrase() -> str:
@@ -60,15 +61,17 @@ def build_parser() -> argparse.ArgumentParser:
     config_help = f"vault config file (default {DEFAULT_CONFIG})"
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--config", default=argparse.SUPPRESS, help=config_help)
-    _add_output_flags(common, default=argparse.SUPPRESS)
-    parser = argparse.ArgumentParser(
+    _add_output_flags(common, dest="output", default=argparse.SUPPRESS)
+    parser = _Parser(
         prog="finvault",
         description="Keep folders in encrypted APFS sparse bundles, unlocked at their own paths.",
     )
     parser.add_argument("--config", default=None, help=config_help)
-    _add_output_flags(parser, default=None)
+    _add_output_flags(parser, dest="root_output", default=None)
     parser.add_argument("--version", action="version", version=f"finvault {__version__}")
-    sub = parser.add_subparsers(dest="command", required=True, metavar="<command>")
+    sub = parser.add_subparsers(
+        dest="command", required=True, metavar="<command>", parser_class=argparse.ArgumentParser
+    )
     p = sub.add_parser("init", parents=[common], help="create the encrypted image for a folder")
     p.add_argument("name")
     p = sub.add_parser("migrate", parents=[common], help="copy a folder into its image (keeps <path>.plain)")
@@ -86,14 +89,26 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _add_output_flags(parser: argparse.ArgumentParser, *, default: object) -> None:
+class _Parser(argparse.ArgumentParser):
+    """Rejects ``--json`` and ``--text`` given on opposite sides of the command."""
+
+    def parse_args(self, args: Sequence[str] | None = None, namespace: None = None) -> argparse.Namespace:  # type: ignore[override]  # narrower than argparse's overloads
+        parsed = super().parse_args(args, namespace)
+        root, sub = getattr(parsed, "root_output", None), getattr(parsed, "output", None)
+        if root and sub and root != sub:
+            self.error("argument --json/--text: give only one of them")
+        parsed.output = sub or root
+        return parsed
+
+
+def _add_output_flags(parser: argparse.ArgumentParser, *, dest: str, default: object) -> None:
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
-        "--json", dest="output", action="store_const", const="json", default=default,
+        "--json", dest=dest, action="store_const", const="json", default=default,
         help="print JSON (the default when stdout is not a terminal)",
     )  # fmt: skip
     group.add_argument(
-        "--text", dest="output", action="store_const", const="text", default=default,
+        "--text", dest=dest, action="store_const", const="text", default=default,
         help="print plain text (the default when stdout is a terminal)",
     )  # fmt: skip
 
@@ -136,9 +151,9 @@ def main(argv: list[str] | None = None, deps: vault.Deps | None = None) -> int:
     try:
         outcome = dispatch(args, deps or default_deps())
     except FinvaultError as exc:
-        print(f"finvault: error: {exc.message}", file=sys.stderr)
+        print(f"finvault: error: {render.clean(exc.message)}", file=sys.stderr)
         if exc.hint:
-            print(f"finvault: what to do: {exc.hint}", file=sys.stderr)
+            print(f"finvault: what to do: {render.clean(exc.hint)}", file=sys.stderr)
         payload = {"ok": False, "command": args.command, "error": exc.message, "hint": exc.hint, **exc.details}
         _emit(payload, args.output)
         return exc.exit_code

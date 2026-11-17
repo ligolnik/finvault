@@ -569,6 +569,25 @@ class SweepFilesTest(TempDirTest):
         self.assertEqual(len(failures), 1)
         self.assertEqual(sw.read_lines(overflow), [late])
 
+    def test_a_vault_paste_is_caught_after_close_once_its_sharing_ends(self) -> None:
+        s, roots, lines = self.build()
+        shared = line("/elsewhere", 500, "shares it", {"1": {"id": 1, "type": "text", "contentHash": "vault01"}})
+        Path(s.history).write_bytes(Path(s.history).read_bytes() + shared)
+        plan = sw.plan_sweep(s, roots)
+        self.assertEqual(plan.pastes, [])  # still shared, so the sweep leaves it
+        self.assertIn("vault01", plan.paste_hashes)
+        Path(s.history).write_bytes(lines[0])  # the other project's line goes away during the close
+        self.assertEqual(sw.traces_left(s, roots, plan.session_ids, plan.paste_hashes)["paste_files"], ["vault01"])
+
+    def test_an_unreadable_folder_inside_the_vault_is_not_a_trace(self) -> None:
+        s, roots, _lines = self.build()
+        os.chmod(s.paste_cache, 0o000)
+        try:
+            left = sw.traces_left(s, (*roots, s.paste_cache), set(), set())
+        finally:
+            os.chmod(s.paste_cache, 0o700)
+        self.assertNotIn("unreadable", left)
+
     def test_vaulting_the_whole_projects_folder_finds_every_session(self) -> None:
         s, roots, _lines = self.build()
         self.write("claude/projects/other-project/sess-other.jsonl", "{}\n")

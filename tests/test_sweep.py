@@ -529,6 +529,15 @@ class SweepFilesTest(TempDirTest):
         self.assertEqual(left["paste_files"], ["vault01"])
         self.assertEqual(left["leftover_temps"], [os.path.join(os.path.dirname(s.history), ".history.jsonl.abc.tmp")])
 
+    def test_traces_left_reports_a_paste_cache_it_cant_read(self) -> None:
+        s, roots, _lines = self.build()
+        os.chmod(s.paste_cache, 0o000)
+        try:
+            left = sw.traces_left(s, roots, set(), {"vault01"})
+        finally:
+            os.chmod(s.paste_cache, 0o700)
+        self.assertEqual(left["unreadable"], [s.paste_cache])
+
     def test_vaulting_the_whole_projects_folder_finds_every_session(self) -> None:
         s, roots, _lines = self.build()
         self.write("claude/projects/other-project/sess-other.jsonl", "{}\n")

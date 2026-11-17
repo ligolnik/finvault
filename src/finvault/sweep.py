@@ -389,6 +389,11 @@ def traces_left(
     kept, vaulted = split_history(read_lines(settings.history), expand_roots(vault_paths))
     if vaulted:
         out["history_lines"] = len(vaulted)
+    unreadable: list[str] = []
+    # A folder that can't be listed hides what is in it, so it is never taken as empty.
+    for folder in (settings.paste_cache, os.path.dirname(settings.history) or "."):
+        if _list(folder) is None:
+            unreadable.append(folder)
     hashes = paste_hashes | pastes_to_move(kept, vaulted)
     pastes = sorted(h for h in hashes if os.path.lexists(os.path.join(settings.paste_cache, f"{h}.txt")))
     if pastes:
@@ -396,7 +401,6 @@ def traces_left(
     leftovers = _leftover_rewrites(settings.history) + _leftover_temps(settings.paste_cache, ".finvault-")
     if leftovers:
         out["leftover_temps"] = leftovers
-    unreadable: list[str] = []
     fh_names = _list(settings.file_history)
     if fh_names is None:
         unreadable.append(settings.file_history)

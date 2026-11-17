@@ -538,6 +538,37 @@ class SweepFilesTest(TempDirTest):
             os.chmod(s.paste_cache, 0o700)
         self.assertEqual(left["unreadable"], [s.paste_cache])
 
+    def test_traces_left_ignores_a_paste_another_project_now_uses(self) -> None:
+        s, roots, lines = self.build()
+        shared = line("/elsewhere", 500, "now shared", {"1": {"id": 1, "type": "text", "contentHash": "vault01"}})
+        Path(s.history).write_bytes(lines[0] + shared)
+        left = sw.traces_left(s, roots, set(), {"vault01"})
+        self.assertNotIn("paste_files", left)
+        self.assertEqual(sw.traces_left(s, roots, set(), {"vault01", "other"}).get("paste_files"), None)
+        Path(s.paste_cache, "other.txt").write_text("vault only")
+        self.assertEqual(sw.traces_left(s, roots, set(), {"vault01", "other"})["paste_files"], ["other"])
+
+    def test_a_partial_overflow_line_is_trimmed_before_the_next_rescue(self) -> None:
+        s, roots, _lines = self.build()
+        archive = os.path.join(roots[0], ".finvault-sweep")
+        os.makedirs(archive)
+        overflow = os.path.join(archive, sw.ARCHIVE_OVERFLOW)
+        Path(overflow).write_bytes(b'{"half a li')
+        late = line("/elsewhere", 999, "rescued")
+        real_append = sw.append_fsync
+
+        def history_full(path: str, data: bytes, mode: int = 0o600) -> None:
+            if path == s.history:
+                raise OSError(28, "No space left on device")
+            real_append(path, data, mode)
+
+        with mock.patch.object(sw, "append_fsync", side_effect=history_full):
+            failures = sw._save_late_lines(  # pyright: ignore[reportPrivateUsage]  # the fallback under test
+                s.history, 0o600, os.path.join(archive, "history.jsonl"), [late], []
+            )
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(sw.read_lines(overflow), [late])
+
     def test_vaulting_the_whole_projects_folder_finds_every_session(self) -> None:
         s, roots, _lines = self.build()
         self.write("claude/projects/other-project/sess-other.jsonl", "{}\n")

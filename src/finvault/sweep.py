@@ -377,11 +377,11 @@ def vaulted_history_lines(settings: SweepSettings, vault_paths: tuple[str, ...])
 
 
 def traces_left(
-    settings: SweepSettings, vault_paths: tuple[str, ...], session_ids: set[str], paste_hashes: set[str]
+    settings: SweepSettings, vault_paths: tuple[str, ...], session_ids: set[str], known_pastes: set[str]
 ) -> dict[str, object]:
     """What belongs in the vault but sits outside it now, for a check after the images close.
 
-    ``session_ids`` and ``paste_hashes`` come from the last plan, made while the
+    ``session_ids`` and ``known_pastes`` come from the last plan, made while the
     projects folders and the archive could still be read. Pastes named by vault
     lines still in the shared history are checked too.
     """
@@ -394,7 +394,11 @@ def traces_left(
     for folder in (settings.paste_cache, os.path.dirname(settings.history) or "."):
         if _list(folder) is None:
             unreadable.append(folder)
-    hashes = paste_hashes | pastes_to_move(kept, vaulted)
+    # A paste another project's lines still use is shared, not a vault trace (as in pastes_to_move).
+    shared: set[str] = set()
+    for line in kept:
+        shared |= paste_hashes(line)
+    hashes = (known_pastes | pastes_to_move(kept, vaulted)) - shared
     pastes = sorted(h for h in hashes if os.path.lexists(os.path.join(settings.paste_cache, f"{h}.txt")))
     if pastes:
         out["paste_files"] = pastes
@@ -646,6 +650,7 @@ def _save_late_lines(path: str, mode: int, archive_file: str, kept: list[bytes],
             # Park them inside the vault rather than lose them; restore-history returns them.
             overflow = os.path.join(os.path.dirname(archive_file), ARCHIVE_OVERFLOW)
             try:
+                trim_partial_line(overflow)
                 append_fsync(overflow, b"".join(ensure_newline(line) for line in kept), FILE_MODE)
             except OSError as again:
                 failures.append(again)

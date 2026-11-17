@@ -278,8 +278,12 @@ def plan_sweep(settings: SweepSettings, vault_paths: tuple[str, ...], archive_di
         f"{leftover} was left by an interrupted paste restore and holds a vault paste; check it, then delete it"
         for leftover in _leftover_temps(settings.paste_cache, ".finvault-")
     )
-    wanted = pastes_to_move(plan.kept, plan.vaulted + read_archived_lines(archive_dir))
-    plan.paste_hashes = wanted
+    archived = read_archived_lines(archive_dir)
+    wanted = pastes_to_move(plan.kept, plan.vaulted + archived)
+    # Every paste the vault's lines name, shared or not: traces_left drops the
+    # ones still shared when it runs, since sharing can end during the close.
+    for vault_line in plan.vaulted + archived:
+        plan.paste_hashes |= paste_hashes(vault_line)
     if wanted and _list(settings.paste_cache) is None:
         plan.problems.append(f"can't read {settings.paste_cache}")
     for h in sorted(wanted):
@@ -390,9 +394,15 @@ def traces_left(
     if vaulted:
         out["history_lines"] = len(vaulted)
     unreadable: list[str] = []
-    # A folder that can't be listed hides what is in it, so it is never taken as empty.
+    roots = expand_roots(vault_paths)
+
+    def cant_check(folder: str) -> bool:
+        # A folder that can't be listed hides what is in it, so it is never taken
+        # as empty, unless it is itself inside the vault (a closed, mode-000 image).
+        return _list(folder) is None and not is_under_any(folder, roots)
+
     for folder in (settings.paste_cache, os.path.dirname(settings.history) or "."):
-        if _list(folder) is None:
+        if cant_check(folder):
             unreadable.append(folder)
     # A paste another project's lines still use is shared, not a vault trace (as in pastes_to_move).
     shared: set[str] = set()
@@ -406,13 +416,13 @@ def traces_left(
     if leftovers:
         out["leftover_temps"] = leftovers
     fh_names = _list(settings.file_history)
-    if fh_names is None:
+    if cant_check(settings.file_history):
         unreadable.append(settings.file_history)
     backups = file_history_to_move(fh_names or [], session_ids)
     if backups:
         out["file_history_folders"] = backups
     scratch_names = _list(settings.scratch_root)
-    if scratch_names is None:
+    if cant_check(settings.scratch_root):
         unreadable.append(settings.scratch_root)
     scratch = scratch_matches(scratch_names or [], settings.scratch_globs)
     if scratch:

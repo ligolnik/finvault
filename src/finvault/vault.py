@@ -544,24 +544,29 @@ def _settled_after_detach(cfg: Config, deps: Deps, closed: list[str]) -> dict[st
     return att
 
 
-def _not_mode_000(cfg: Config, deps: Deps, att: dict[str, Attached], closed: list[str]) -> list[str]:
-    """Closed vault folders that are not mode 000, whether closed now or earlier; warns about them.
+def _not_mode_000(
+    cfg: Config, deps: Deps, att: dict[str, Attached], closed: list[str], relocked: list[str]
+) -> list[str]:
+    """Closed vault folders not left as a mode-000 directory, closed now or earlier; warns about them.
 
-    A folder in ``closed`` was detached in this run: it counts even when
-    ``hdiutil info`` still lists its image, which is exactly when relocking skips it.
+    Two checks, so neither gap can hide the other:
+    - every folder detached in this run (``closed``) that relocking did not set to 000,
+      whatever is at its path or however long ``hdiutil info`` keeps listing it;
+    - every closed folder whose path holds anything but a mode-000 directory
+      (a plain file, a symlink, a folder with another mode). A missing path is fine:
+      unlock recreates it.
     """
-    names = [
-        f.name
-        for f in cfg.folders
-        if (f.name not in att or f.name in closed)
-        and os.path.isdir(cfg.image_path(f))
-        and os.path.isdir(f.path)
-        and _mode(f.path) != LOCKED_MODE
-    ]
+    bad = {n for n in closed if n not in relocked}
+    for f in cfg.folders:
+        if f.name in att or not os.path.isdir(cfg.image_path(f)) or not os.path.lexists(f.path):
+            continue
+        if os.path.islink(f.path) or not os.path.isdir(f.path) or _mode(f.path) != LOCKED_MODE:
+            bad.add(f.name)
+    names = [f.name for f in cfg.folders if f.name in bad]
     if names:
         deps.warn(
             f"{', '.join(names)} closed but not set to mode 000 "
-            "(hdiutil still lists the image, or the folder has files); run finvault lock again"
+            "(hdiutil still lists the image, or something else is at the folder's path); run finvault lock again"
         )
     return names
 
@@ -574,7 +579,7 @@ def _lock_closed_vault(cfg: Config, deps: Deps, *, skip_sweep: bool) -> Outcome:
     """
     already = _relock_mountpoints(cfg, deps, {})
     data: dict[str, object] = {"locked": [], "already_locked": already, "sweep": None}
-    not_locked = _not_mode_000(cfg, deps, {}, [])
+    not_locked = _not_mode_000(cfg, deps, {}, [], [])
     if not_locked:
         data["not_mode_000"] = not_locked
     outside: dict[str, object] = {}
@@ -591,10 +596,13 @@ def _lock_closed_vault(cfg: Config, deps: Deps, *, skip_sweep: bool) -> Outcome:
 
 
 def _relock_mountpoints(cfg: Config, deps: Deps, att: dict[str, Attached]) -> list[str]:
-    """Set each closed vault folder to mode 000. Never touches a folder with files."""
+    """Set each closed vault folder to mode 000. Never touches a folder with files, or follows a symlink."""
     done: list[str] = []
     for f in cfg.folders:
         if f.name in att or not os.path.isdir(cfg.image_path(f)) or not os.path.isdir(f.path):
+            continue
+        if os.path.islink(f.path):
+            # chmod would change the link's target; _not_mode_000 reports it instead.
             continue
         if _mode(f.path) == LOCKED_MODE:
             done.append(f.name)
@@ -757,7 +765,7 @@ def lock(cfg: Config, deps: Deps, *, force: bool = False, skip_sweep: bool = Fal
             failed.append({"name": name, "reason": str(exc)})
     att_after = _settled_after_detach(cfg, deps, locked)
     relocked = _relock_mountpoints(cfg, deps, att_after)
-    not_locked = _not_mode_000(cfg, deps, att_after, locked)
+    not_locked = _not_mode_000(cfg, deps, att_after, locked, relocked)
     data: dict[str, object] = {
         "locked": locked,
         "mode_000": relocked,

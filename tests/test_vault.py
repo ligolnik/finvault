@@ -498,6 +498,39 @@ class LockUnlockTest(VaultTestBase):
         self.assertEqual(out.exit_code, 1, out.data)
         self.assertEqual(sorted(out.data["not_mode_000"]), ["docs", "notes"])  # type: ignore[arg-type]
 
+    def test_lock_fails_when_a_mountpoint_is_replaced_by_a_file_during_the_close(self) -> None:
+        cfg, platform, deps = self.setup_vault()
+        real_detach = platform.detach
+
+        def detach_then_plant_file(device: str) -> None:
+            real_detach(device)
+            for f in cfg.folders:
+                if os.path.isdir(f.path) and not os.listdir(f.path):
+                    os.rmdir(f.path)
+                    Path(f.path).write_text("PLAINTEXT")
+
+        platform.detach = detach_then_plant_file  # type: ignore[method-assign]  # something swaps the mountpoint
+        out = vault.lock(cfg, deps, skip_sweep=True)
+        self.assertEqual(out.exit_code, 1, out.data)
+        self.assertEqual(sorted(out.data["not_mode_000"]), ["docs", "notes"])  # type: ignore[arg-type]
+        again = vault.lock(cfg, deps, skip_sweep=True)
+        self.assertEqual(again.exit_code, 1, again.data)
+        self.assertEqual(sorted(again.data["not_mode_000"]), ["docs", "notes"])  # type: ignore[arg-type]
+
+    def test_lock_never_chmods_the_target_of_a_symlinked_mountpoint(self) -> None:
+        cfg, _platform, deps = self.setup_vault()
+        vault.lock(cfg, deps)
+        docs = cfg.folder("docs").path
+        elsewhere = self.path("elsewhere")
+        os.mkdir(elsewhere, 0o755)
+        os.chmod(docs, 0o700)
+        os.rmdir(docs)
+        os.symlink(elsewhere, docs)
+        out = vault.lock(cfg, deps)
+        self.assertEqual(out.exit_code, 1, out.data)
+        self.assertEqual(out.data["not_mode_000"], ["docs"])
+        self.assertEqual(mode(elsewhere), 0o755)
+
     def test_lock_fails_when_a_closed_folder_cant_be_set_to_000(self) -> None:
         cfg, platform, deps = self.setup_vault()
         docs = cfg.folder("docs").path

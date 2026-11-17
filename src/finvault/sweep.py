@@ -34,6 +34,9 @@ SESSION_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 ARCHIVE_HISTORY = "history.jsonl"
 ARCHIVE_FILE_HISTORY = "file-history"
 ARCHIVE_PASTE_CACHE = "paste-cache"
+# Late lines for other projects that could not go back into the shared history
+# (a full main disk). restore-history merges them back.
+ARCHIVE_OVERFLOW = "history-overflow.jsonl"
 DIR_MODE = 0o700
 FILE_MODE = 0o600
 
@@ -208,6 +211,7 @@ class SweepPlan:
     unreadable_projects: list[str] = field(default_factory=list[str])
     problems: list[str] = field(default_factory=list[str])
     session_ids: set[str] = field(default_factory=set[str])
+    paste_hashes: set[str] = field(default_factory=set[str])
 
     def counts(self) -> dict[str, object]:
         return {
@@ -275,6 +279,7 @@ def plan_sweep(settings: SweepSettings, vault_paths: tuple[str, ...], archive_di
         for leftover in _leftover_temps(settings.paste_cache, ".finvault-")
     )
     wanted = pastes_to_move(plan.kept, plan.vaulted + read_archived_lines(archive_dir))
+    plan.paste_hashes = wanted
     if wanted and _list(settings.paste_cache) is None:
         plan.problems.append(f"can't read {settings.paste_cache}")
     for h in sorted(wanted):
@@ -285,7 +290,11 @@ def plan_sweep(settings: SweepSettings, vault_paths: tuple[str, ...], archive_di
 
     session_ids: set[str] = set()
     for root in vault_paths:
-        if not is_under(root, settings.projects_dir) or root == os.path.normpath(settings.projects_dir):
+        if is_under(settings.projects_dir, root):
+            # The whole projects folder is in the vault: every session there is a vault session.
+            session_ids |= _all_project_sessions(settings.projects_dir, plan)
+            continue
+        if not is_under(root, settings.projects_dir):
             continue
         names = _list(root)
         if names is None:
@@ -317,6 +326,30 @@ def plan_sweep(settings: SweepSettings, vault_paths: tuple[str, ...], archive_di
     return plan
 
 
+def _all_project_sessions(projects_dir: str, plan: SweepPlan) -> set[str]:
+    """Session ids of every project folder in ``projects_dir``; unreadable ones become problems."""
+    ids: set[str] = set()
+    names = _list(projects_dir)
+    if names is None:
+        plan.unreadable_projects.append(projects_dir)
+        plan.problems.append(f"can't read {projects_dir}, so its sessions' file-history can't be found")
+        return ids
+    ids |= session_ids_from_names(names)
+    for name in names:
+        entry = os.path.join(projects_dir, name)
+        mode = os.lstat(entry).st_mode
+        if stat.S_ISLNK(mode):
+            plan.problems.append(f"{entry} is a symlink; finvault won't follow it to find sessions")
+        elif stat.S_ISDIR(mode):
+            inner = _list(entry)
+            if inner is None:
+                plan.unreadable_projects.append(entry)
+                plan.problems.append(f"can't read {entry}, so its sessions' file-history can't be found")
+            else:
+                ids |= session_ids_from_names(inner)
+    return ids
+
+
 def _raise_walk_error(err: OSError) -> None:
     raise err
 
@@ -343,16 +376,26 @@ def vaulted_history_lines(settings: SweepSettings, vault_paths: tuple[str, ...])
     return len(split_history(read_lines(settings.history), expand_roots(vault_paths))[1])
 
 
-def traces_left(settings: SweepSettings, vault_paths: tuple[str, ...], session_ids: set[str]) -> dict[str, object]:
+def traces_left(
+    settings: SweepSettings, vault_paths: tuple[str, ...], session_ids: set[str], paste_hashes: set[str]
+) -> dict[str, object]:
     """What belongs in the vault but sits outside it now, for a check after the images close.
 
-    ``session_ids`` comes from the last plan, made while the projects folders
-    could still be read.
+    ``session_ids`` and ``paste_hashes`` come from the last plan, made while the
+    projects folders and the archive could still be read. Pastes named by vault
+    lines still in the shared history are checked too.
     """
     out: dict[str, object] = {}
-    lines = vaulted_history_lines(settings, vault_paths)
-    if lines:
-        out["history_lines"] = lines
+    kept, vaulted = split_history(read_lines(settings.history), expand_roots(vault_paths))
+    if vaulted:
+        out["history_lines"] = len(vaulted)
+    hashes = paste_hashes | pastes_to_move(kept, vaulted)
+    pastes = sorted(h for h in hashes if os.path.lexists(os.path.join(settings.paste_cache, f"{h}.txt")))
+    if pastes:
+        out["paste_files"] = pastes
+    leftovers = _leftover_rewrites(settings.history) + _leftover_temps(settings.paste_cache, ".finvault-")
+    if leftovers:
+        out["leftover_temps"] = leftovers
     unreadable: list[str] = []
     fh_names = _list(settings.file_history)
     if fh_names is None:
@@ -587,7 +630,8 @@ def _save_late_lines(path: str, mode: int, archive_file: str, kept: list[bytes],
     """Write late lines where they belong, each destination tried on its own.
 
     Memory holds the only copy, so a failure never stops the other write. Vaulted
-    lines that can't reach the archive go back into history for the next sweep.
+    lines that can't reach the archive go back into history for the next sweep;
+    other lines that can't reach history are parked in ``ARCHIVE_OVERFLOW``.
     """
     failures: list[OSError] = []
     if kept:
@@ -595,6 +639,12 @@ def _save_late_lines(path: str, mode: int, archive_file: str, kept: list[bytes],
             append_fsync(path, b"".join(kept), mode)
         except OSError as exc:
             failures.append(exc)
+            # Park them inside the vault rather than lose them; restore-history returns them.
+            overflow = os.path.join(os.path.dirname(archive_file), ARCHIVE_OVERFLOW)
+            try:
+                append_fsync(overflow, b"".join(ensure_newline(line) for line in kept), FILE_MODE)
+            except OSError as again:
+                failures.append(again)
     if vaulted:
         try:
             append_fsync(archive_file, b"".join(new_archive_lines(read_lines(archive_file), vaulted)), FILE_MODE)
@@ -635,7 +685,7 @@ def apply_sweep(
     if plan.is_empty():
         return report
     ensure_dir_inside(archive_dir, vault_root, DIR_MODE)
-    for name in (ARCHIVE_HISTORY, ARCHIVE_PASTE_CACHE, ARCHIVE_FILE_HISTORY):
+    for name in (ARCHIVE_HISTORY, ARCHIVE_PASTE_CACHE, ARCHIVE_FILE_HISTORY, ARCHIVE_OVERFLOW):
         entry = os.path.join(archive_dir, name)
         if os.path.islink(entry):
             raise FinvaultError(
@@ -677,8 +727,10 @@ def apply_sweep(
 def restore_history(settings: SweepSettings, archive_dir: str) -> dict[str, object]:
     """Merge archived history lines back and copy back missing paste files."""
     archive_file = os.path.join(archive_dir, ARCHIVE_HISTORY)
+    overflow = os.path.join(archive_dir, ARCHIVE_OVERFLOW)
     trim_partial_line(archive_file)
-    archived = read_lines(archive_file)
+    trim_partial_line(overflow)
+    archived = read_lines(archive_file) + read_lines(overflow)
     stamp = file_stamp(settings.history)
     current = read_lines(settings.history) if stamp is not None else []
     merged = merge_history(current, archived)

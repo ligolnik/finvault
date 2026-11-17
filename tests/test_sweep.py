@@ -490,10 +490,51 @@ class SweepFilesTest(TempDirTest):
         s, roots, _lines = self.build()
         os.chmod(s.file_history, 0o000)
         try:
-            left = sw.traces_left(s, roots, {"sess-a"})
+            left = sw.traces_left(s, roots, {"sess-a"}, set())
         finally:
             os.chmod(s.file_history, 0o700)
         self.assertEqual(left["unreadable"], [s.file_history])
+
+    def test_late_line_for_another_project_is_parked_in_the_vault_when_history_is_full(self) -> None:
+        s, roots, _lines = self.build()
+        archive = os.path.join(roots[0], ".finvault-sweep")
+        late = line("/elsewhere", 999, "UNIQUE LATE OTHER PROJECT")
+        real_replace, real_append = os.replace, sw.append_fsync
+
+        def race_then_replace(src: str, dst: str) -> None:
+            if dst == s.history:
+                with open(s.history, "ab") as fh:
+                    fh.write(late)
+            real_replace(src, dst)
+
+        def history_full(path: str, data: bytes, mode: int = 0o600) -> None:
+            if path == s.history:
+                raise OSError(28, "No space left on device")
+            real_append(path, data, mode)
+
+        with (
+            mock.patch.object(sw.os, "replace", side_effect=race_then_replace),
+            mock.patch.object(sw, "append_fsync", side_effect=history_full),
+            self.assertRaises(OSError),
+        ):
+            sw.apply_sweep(sw.plan_sweep(s, roots, archive), s, archive, roots[0], roots)
+        self.assertEqual(sw.read_lines(os.path.join(archive, sw.ARCHIVE_OVERFLOW)), [late])
+        sw.restore_history(s, archive)
+        self.assertIn(late, sw.read_lines(s.history))
+
+    def test_traces_left_finds_vault_pastes_and_leftover_temps(self) -> None:
+        s, roots, _lines = self.build()
+        self.write("claude/.history.jsonl.abc.tmp", "x")
+        left = sw.traces_left(s, roots, set(), {"vault01", "gone99"})
+        self.assertEqual(left["paste_files"], ["vault01"])
+        self.assertEqual(left["leftover_temps"], [os.path.join(os.path.dirname(s.history), ".history.jsonl.abc.tmp")])
+
+    def test_vaulting_the_whole_projects_folder_finds_every_session(self) -> None:
+        s, roots, _lines = self.build()
+        self.write("claude/projects/other-project/sess-other.jsonl", "{}\n")
+        plan = sw.plan_sweep(s, (roots[0], s.projects_dir))
+        self.assertEqual(plan.file_history, ["sess-a", "sess-other"])
+        self.assertTrue(plan.is_complete())
 
     def test_interrupted_restore_leaves_no_temp_file(self) -> None:
         s, roots, _lines = self.build()

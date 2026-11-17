@@ -104,6 +104,29 @@ def _sweep_lines(counts: dict[str, object], moved: str, deleted: str, nothing: s
     return out or [nothing]
 
 
+TRACE_NAMES = {
+    "history_lines": "history lines",
+    "paste_files": "paste files",
+    "file_history_folders": "file-history folders",
+    "scratch_folders": "scratch folders",
+    "leftover_temps": "leftover temp files",
+    "unreadable": "couldn't check",
+}
+
+
+def _traces(traces: dict[str, object], view: _View) -> Lines:
+    """One line per kind of trace: a count, or the names it lists."""
+    out: Lines = []
+    for key, value in sorted(traces.items()):
+        label = TRACE_NAMES.get(key, key)
+        items = as_list(value)
+        if items is None:
+            out.append(f"  {label}: {value}")
+        else:
+            out.append(f"  {label}: {', '.join(view.path(i) for i in items)}")
+    return out
+
+
 def _reasons(title: str, items: list[dict[str, object]]) -> Lines:
     if not items:
         return []
@@ -217,7 +240,11 @@ def _lock(payload: dict[str, object], view: _View) -> Lines:
     late = as_dict(payload.get("written_while_locking"))
     if late:
         out.append("Written while locking, still outside the vault (unlock and lock again):")
-        out += [f"  {k}: {v}" for k, v in sorted(late.items())]
+        out += _traces(late, view)
+    outside = as_dict(payload.get("traces_outside"))
+    if outside:
+        out.append("Vault traces outside the vault (unlock, then lock to sweep them):")
+        out += _traces(outside, view)
     not_000 = _strs(payload.get("not_mode_000"))
     if not_000:
         out.append(f"Closed but not set to mode 000: {', '.join(not_000)} (run finvault lock again)")

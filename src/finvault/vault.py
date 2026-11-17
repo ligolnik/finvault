@@ -451,6 +451,19 @@ def _prepare_mountpoint(path: str) -> str | None:
     return None
 
 
+def _relock_closed(path: str, warn: Callable[[str], None]) -> None:
+    """Set a closed, empty mountpoint back to mode 000; leave anything else alone.
+
+    Runs during cleanup, so a failure warns instead of hiding the error that
+    caused the cleanup.
+    """
+    try:
+        if os.path.isdir(path) and not os.path.islink(path) and not os.path.ismount(path) and _is_empty_dir(path):
+            os.chmod(path, LOCKED_MODE)
+    except OSError as exc:
+        warn(f"couldn't set {path} back to mode 000 ({exc.strerror or exc}); run finvault lock")
+
+
 def unlock(cfg: Config, deps: Deps) -> Outcome:
     check_state(cfg)
     att = attached_by_folder(cfg, deps)
@@ -470,15 +483,20 @@ def unlock(cfg: Config, deps: Deps) -> Outcome:
         else:
             todo.append(f)
     ready: list[Folder] = []
-    for f in todo:
-        problem = _prepare_mountpoint(f.path)
-        if problem:
-            failed.append({"name": f.name, "reason": f"{f.path}: {problem}"})
-        else:
-            ready.append(f)
+    touched: list[Folder] = []
     unlocked: list[str] = []
-    if ready:
-        try:
+    try:
+        for f in todo:
+            touched.append(f)
+            try:
+                problem = _prepare_mountpoint(f.path)
+            except OSError as exc:
+                problem = f"can't prepare it ({exc.strerror or exc})"
+            if problem:
+                failed.append({"name": f.name, "reason": f"{f.path}: {problem}"})
+            else:
+                ready.append(f)
+        if ready:
             pw = deps.ask_passphrase()
             for i, f in enumerate(ready):
                 try:
@@ -489,12 +507,13 @@ def unlock(cfg: Config, deps: Deps) -> Outcome:
                     failed.append({"name": f.name, "reason": str(exc)})
                     continue
                 unlocked.append(f.name)
-        finally:
-            # A cancelled prompt, a wrong passphrase or a failed attach must not
-            # leave a writable plain folder where the vault belongs.
-            for f in ready:
-                if f.name not in unlocked:
-                    os.chmod(f.path, LOCKED_MODE)
+    finally:
+        # A failed preparation, a cancelled prompt, a wrong passphrase or a failed
+        # attach must not leave a writable plain folder where the vault belongs.
+        for f in touched:
+            if f.name not in unlocked:
+                _relock_closed(f.path, deps.warn)
+    if unlocked:
         now_att = attached_by_folder(cfg, deps)
         for name in list(unlocked):
             f = cfg.folder(name)
@@ -523,6 +542,48 @@ def _settled_after_detach(cfg: Config, deps: Deps, closed: list[str]) -> dict[st
         waited += DETACH_POLL_SEC
         att = attached_by_folder(cfg, deps)
     return att
+
+
+def _not_mode_000(cfg: Config, deps: Deps, att: dict[str, Attached]) -> list[str]:
+    """Closed vault folders that are not mode 000, whether closed now or earlier; warns about them."""
+    names = [
+        f.name
+        for f in cfg.folders
+        if f.name not in att
+        and os.path.isdir(cfg.image_path(f))
+        and os.path.isdir(f.path)
+        and _mode(f.path) != LOCKED_MODE
+    ]
+    if names:
+        deps.warn(
+            f"{', '.join(names)} closed but not set to mode 000 "
+            "(hdiutil still lists the image, or the folder has files); run finvault lock again"
+        )
+    return names
+
+
+def _lock_closed_vault(cfg: Config, deps: Deps, *, skip_sweep: bool) -> Outcome:
+    """``lock`` with every image already closed: relock mountpoints and look for traces left outside.
+
+    Nothing can be swept while the archive is closed, so traces found here are
+    reported with the advice to unlock and lock again, never as a clean lock.
+    """
+    already = _relock_mountpoints(cfg, deps, {})
+    data: dict[str, object] = {"locked": [], "already_locked": already, "sweep": None}
+    not_locked = _not_mode_000(cfg, deps, {})
+    if not_locked:
+        data["not_mode_000"] = not_locked
+    outside: dict[str, object] = {}
+    if cfg.sweep is not None and not skip_sweep:
+        # Session ids and archived pastes can't be read while closed; what the
+        # shared files themselves show is still checked.
+        outside = sw.traces_left(cfg.sweep, cfg.vault_paths(), set(), set())
+        if outside:
+            data["traces_outside"] = outside
+            deps.warn(
+                f"vault traces are outside the vault ({', '.join(sorted(outside))}); unlock, then lock to sweep them"
+            )
+    return Outcome(data, EXIT_FAILURE if outside or not_locked else EXIT_OK)
 
 
 def _relock_mountpoints(cfg: Config, deps: Deps, att: dict[str, Attached]) -> list[str]:
@@ -595,12 +656,13 @@ def _require_history_released(cfg: Config, deps: Deps) -> None:
         )
 
 
-def _run_sweep(cfg: Config, deps: Deps) -> tuple[dict[str, object], set[str]]:
+def _run_sweep(cfg: Config, deps: Deps) -> tuple[dict[str, object], sw.SweepPlan]:
     """Sweep, then plan again until nothing is left, so a late write or an
     interrupted earlier sweep cannot leave traces behind.
 
-    Returns the report and the vault's session ids from the final plan, for the
-    check after the images close (their projects folders can't be read then).
+    Returns the report and the final plan, whose session ids and paste hashes
+    feed the check after the images close (the projects folders and the archive
+    can't be read then).
     """
     assert cfg.sweep is not None
     archive_dir = cfg.sweep_archive_dir()
@@ -617,7 +679,7 @@ def _run_sweep(cfg: Config, deps: Deps) -> tuple[dict[str, object], set[str]]:
                     details={"problems": list(plan.problems)},
                 )
             if plan.is_empty():
-                return (plan.counts() if total is None else total), plan.session_ids
+                return (plan.counts() if total is None else total), plan
             if attempt > SWEEP_ATTEMPTS:
                 break
             if plan.vaulted:
@@ -648,7 +710,7 @@ def lock(cfg: Config, deps: Deps, *, force: bool = False, skip_sweep: bool = Fal
     check_state(cfg)
     att = attached_by_folder(cfg, deps)
     if not att:
-        return Outcome({"locked": [], "already_locked": _relock_mountpoints(cfg, deps, att), "sweep": None})
+        return _lock_closed_vault(cfg, deps, skip_sweep=skip_sweep)
 
     killed: list[str] = []
     procs = _open_in_vault(deps, att)
@@ -676,10 +738,10 @@ def lock(cfg: Config, deps: Deps, *, force: bool = False, skip_sweep: bool = Fal
         )
 
     sweep_report: dict[str, object] | None = None
-    session_ids: set[str] = set()
+    last_plan: sw.SweepPlan | None = None
     if cfg.sweep is not None and not skip_sweep:
         _require_archive_unlocked(cfg, att)
-        sweep_report, session_ids = _run_sweep(cfg, deps)
+        sweep_report, last_plan = _run_sweep(cfg, deps)
 
     locked: list[str] = []
     failed: list[dict[str, str]] = []
@@ -691,12 +753,7 @@ def lock(cfg: Config, deps: Deps, *, force: bool = False, skip_sweep: bool = Fal
             failed.append({"name": name, "reason": str(exc)})
     att_after = _settled_after_detach(cfg, deps, locked)
     relocked = _relock_mountpoints(cfg, deps, att_after)
-    not_locked = [n for n in locked if n not in relocked]
-    if not_locked:
-        deps.warn(
-            f"{', '.join(not_locked)} closed but not set to mode 000 "
-            "(hdiutil still lists the image, or the folder has files); run finvault lock again"
-        )
+    not_locked = _not_mode_000(cfg, deps, att_after)
     data: dict[str, object] = {
         "locked": locked,
         "mode_000": relocked,
@@ -706,10 +763,10 @@ def lock(cfg: Config, deps: Deps, *, force: bool = False, skip_sweep: bool = Fal
         "terminals": _term_report(terms),
     }
     left: dict[str, object] = {}
-    if sweep_report is not None and cfg.sweep is not None:
+    if last_plan is not None and cfg.sweep is not None:
         # A session can still write about the vault after the last sweep pass
-        # (history, backups, scratch); say so rather than report a clean lock.
-        left = sw.traces_left(cfg.sweep, cfg.vault_paths(), session_ids)
+        # (history, pastes, backups, scratch); say so rather than report a clean lock.
+        left = sw.traces_left(cfg.sweep, cfg.vault_paths(), last_plan.session_ids, last_plan.paste_hashes)
         if left:
             data["written_while_locking"] = left
             if "history_lines" in left:
@@ -810,7 +867,7 @@ def sweep(cfg: Config, deps: Deps, *, dry_run: bool) -> Outcome:
         plan = sw.plan_sweep(cfg.sweep, cfg.vault_paths(), cfg.sweep_archive_dir())
         return Outcome({"dry_run": True, **plan.counts()})
     _require_archive_unlocked(cfg, attached_by_folder(cfg, deps))
-    report, _sessions = _run_sweep(cfg, deps)
+    report, _plan = _run_sweep(cfg, deps)
     return Outcome({"dry_run": False, **report})
 
 

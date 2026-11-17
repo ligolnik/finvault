@@ -124,7 +124,31 @@ class RenderTest(unittest.TestCase):
                 "Could not close:",
                 "  notes: Resource busy",
                 "Written while locking, still outside the vault (unlock and lock again):",
-                "  history_lines: 1",
+                "  history lines: 1",
+                "Closed but not set to mode 000: notes (run finvault lock again)",
+            ],
+        )
+
+    def test_lock_on_a_closed_vault_lists_traces_outside_by_name(self) -> None:
+        out = text(
+            {
+                "ok": False,
+                "command": "lock",
+                "locked": [],
+                "already_locked": ["docs"],
+                "sweep": None,
+                "traces_outside": {"history_lines": 2, "paste_files": ["abc"], "leftover_temps": [f"{HOME}/.t.tmp"]},
+                "not_mode_000": ["notes"],
+            }
+        )
+        self.assertEqual(
+            out.splitlines(),
+            [
+                "Already locked: docs",
+                "Vault traces outside the vault (unlock, then lock to sweep them):",
+                "  history lines: 2",
+                "  leftover temp files: ~/.t.tmp",
+                "  paste files: abc",
                 "Closed but not set to mode 000: notes (run finvault lock again)",
             ],
         )

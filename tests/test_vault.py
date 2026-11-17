@@ -10,6 +10,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 from finvault import cli, vault
 from finvault.config import Config, Folder
@@ -525,6 +526,105 @@ class LockUnlockTest(VaultTestBase):
         self.assertEqual(out.exit_code, 1)
         self.assertEqual(len(tries), 2 * vault.DETACH_ATTEMPTS)
         self.assertEqual(sorted(f["name"] for f in out.data["failed"]), ["docs", "notes"])  # type: ignore[union-attr, index]
+
+    def test_lock_reports_a_paste_recreated_while_it_closed_the_images(self) -> None:
+        cfg, platform, deps = self.setup_vault()
+        docs = cfg.folder("docs").path
+        paste = self.write("claude/paste-cache/vault01.txt", "PRIVATE PASTE")
+        entry: dict[str, object] = {
+            "display": "x",
+            "timestamp": 1,
+            "project": docs,
+            "pastedContents": {"1": {"contentHash": "vault01"}},
+        }
+        self.write("claude/history.jsonl", json.dumps(entry) + "\n")
+        real_detach = platform.detach
+
+        def detach_then_recreate(device: str) -> None:
+            real_detach(device)
+            Path(paste).write_text("PRIVATE PASTE")
+
+        platform.detach = detach_then_recreate  # type: ignore[method-assign]  # a writer races the close
+        out = vault.lock(cfg, deps)
+        self.assertEqual(out.exit_code, 1)
+        self.assertEqual(out.data["written_while_locking"], {"paste_files": ["vault01"]})
+
+    def test_lock_on_a_closed_vault_reports_history_left_outside(self) -> None:
+        cfg, _platform, deps = self.setup_vault()
+        vault.lock(cfg, deps)
+        entry: dict[str, object] = {
+            "display": "x",
+            "pastedContents": {},
+            "timestamp": 2,
+            "project": cfg.folder("docs").path,
+        }
+        self.write("claude/history.jsonl", json.dumps(entry) + "\n")
+        out = vault.lock(cfg, deps)
+        self.assertEqual(out.exit_code, 1)
+        self.assertEqual(out.data["traces_outside"], {"history_lines": 1})
+        self.assertEqual(vault.lock(cfg, deps, skip_sweep=True).exit_code, 0)
+
+    def test_lock_on_a_closed_vault_reports_a_folder_not_at_000(self) -> None:
+        cfg, _platform, deps = self.setup_vault()
+        vault.lock(cfg, deps)
+        docs = cfg.folder("docs").path
+        os.chmod(docs, 0o700)
+        Path(docs, "stray").write_text("PRIVATE")
+        out = vault.lock(cfg, deps)
+        self.assertEqual(out.exit_code, 1)
+        self.assertEqual(out.data["not_mode_000"], ["docs"])
+        self.assertEqual(out.data["already_locked"], ["notes"])
+
+    def test_whole_projects_folder_in_the_vault_sweeps_every_backup(self) -> None:
+        cfg = self.vault_config()
+        projects = self.path("claude", "projects")
+        self.write("claude/projects/project-one/sess-a.jsonl", "{}\n")
+        backup = self.write("claude/file-history/sess-a/backup", "PRIVATE BACKUP")
+        cfg = replace(cfg, folders=(cfg.folder("docs"), Folder("sessions", projects)))
+        platform = FakePlatform()
+        deps = fake_deps(platform)
+        for f in cfg.folders:
+            vault.init(cfg, deps, f.name)
+            vault.migrate(cfg, deps, f.name)
+        out = vault.lock(cfg, deps)
+        self.assertEqual(out.exit_code, 0, out.data)
+        self.assertFalse(os.path.exists(backup))
+
+    def test_unlock_reports_a_folder_it_cant_prepare_and_unlocks_the_rest(self) -> None:
+        cfg, platform, deps = self.setup_vault()
+        vault.lock(cfg, deps)
+        notes = cfg.folder("notes").path
+        os.rmdir(notes)
+        parent = os.path.dirname(notes)
+        os.chmod(parent, 0o500)
+        try:
+            out = vault.unlock(cfg, deps)
+        finally:
+            os.chmod(parent, 0o700)
+        self.assertEqual(out.exit_code, 1)
+        self.assertEqual(out.data["unlocked"], ["docs"])
+        self.assertEqual([f["name"] for f in out.data["failed"]], ["notes"])  # type: ignore[union-attr, index]
+        self.assertIn(os.path.realpath(cfg.image_path(cfg.folder("docs"))), platform.mounts)
+
+    def test_an_interrupted_unlock_relocks_every_folder_it_prepared(self) -> None:
+        cfg, _platform, deps = self.setup_vault()
+        vault.lock(cfg, deps)
+        real_prepare = vault._prepare_mountpoint  # pyright: ignore[reportPrivateUsage]  # inject a Ctrl-C mid-way
+        calls: list[str] = []
+
+        def prepare_then_interrupt(path: str) -> str | None:
+            calls.append(path)
+            if len(calls) == 2:
+                raise KeyboardInterrupt
+            return real_prepare(path)
+
+        with (
+            mock.patch.object(vault, "_prepare_mountpoint", side_effect=prepare_then_interrupt),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            vault.unlock(cfg, deps)
+        for f in cfg.folders:
+            self.assertEqual(mode(f.path), 0o000)
 
     def test_verify_ignores_the_sweep_archive_written_after_migrate(self) -> None:
         cfg, _platform, deps = self.setup_vault()

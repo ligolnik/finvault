@@ -544,12 +544,16 @@ def _settled_after_detach(cfg: Config, deps: Deps, closed: list[str]) -> dict[st
     return att
 
 
-def _not_mode_000(cfg: Config, deps: Deps, att: dict[str, Attached]) -> list[str]:
-    """Closed vault folders that are not mode 000, whether closed now or earlier; warns about them."""
+def _not_mode_000(cfg: Config, deps: Deps, att: dict[str, Attached], closed: list[str]) -> list[str]:
+    """Closed vault folders that are not mode 000, whether closed now or earlier; warns about them.
+
+    A folder in ``closed`` was detached in this run: it counts even when
+    ``hdiutil info`` still lists its image, which is exactly when relocking skips it.
+    """
     names = [
         f.name
         for f in cfg.folders
-        if f.name not in att
+        if (f.name not in att or f.name in closed)
         and os.path.isdir(cfg.image_path(f))
         and os.path.isdir(f.path)
         and _mode(f.path) != LOCKED_MODE
@@ -570,7 +574,7 @@ def _lock_closed_vault(cfg: Config, deps: Deps, *, skip_sweep: bool) -> Outcome:
     """
     already = _relock_mountpoints(cfg, deps, {})
     data: dict[str, object] = {"locked": [], "already_locked": already, "sweep": None}
-    not_locked = _not_mode_000(cfg, deps, {})
+    not_locked = _not_mode_000(cfg, deps, {}, [])
     if not_locked:
         data["not_mode_000"] = not_locked
     outside: dict[str, object] = {}
@@ -753,7 +757,7 @@ def lock(cfg: Config, deps: Deps, *, force: bool = False, skip_sweep: bool = Fal
             failed.append({"name": name, "reason": str(exc)})
     att_after = _settled_after_detach(cfg, deps, locked)
     relocked = _relock_mountpoints(cfg, deps, att_after)
-    not_locked = _not_mode_000(cfg, deps, att_after)
+    not_locked = _not_mode_000(cfg, deps, att_after, locked)
     data: dict[str, object] = {
         "locked": locked,
         "mode_000": relocked,

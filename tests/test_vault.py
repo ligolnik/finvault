@@ -480,6 +480,24 @@ class LockUnlockTest(VaultTestBase):
         for f in cfg.folders:
             self.assertEqual(mode(f.path), 0o000)
 
+    def test_lock_fails_when_hdiutil_keeps_listing_a_closed_image(self) -> None:
+        cfg, platform, deps = self.setup_vault()
+        stale = platform.attached_images()
+
+        def stale_after_detach() -> list[Attached]:
+            return stale  # every image still listed, however long lock waits
+
+        real_detach = platform.detach
+
+        def detach_then_stale(device: str) -> None:
+            real_detach(device)
+            platform.attached_images = stale_after_detach  # type: ignore[method-assign]  # hdiutil info never catches up
+
+        platform.detach = detach_then_stale  # type: ignore[method-assign]
+        out = vault.lock(cfg, deps)
+        self.assertEqual(out.exit_code, 1, out.data)
+        self.assertEqual(sorted(out.data["not_mode_000"]), ["docs", "notes"])  # type: ignore[arg-type]
+
     def test_lock_fails_when_a_closed_folder_cant_be_set_to_000(self) -> None:
         cfg, platform, deps = self.setup_vault()
         docs = cfg.folder("docs").path

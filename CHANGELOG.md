@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.14 — 2026-11-17
+
+### Fixed
+
+Findings from a third adversarial Codex review, of 0.1.11 plus the text output. Each has a regression test that fails on the old code. Its two text-output findings (control characters, mixed `--json`/`--text`) shipped in 0.1.13.
+
+- A line for another project written during the history rename was lost when only the main disk was full: the fallback covered vault lines only. Such lines are now parked inside the vault in `history-overflow.jsonl`, and `restore-history` merges them back.
+- A vault paste put back in the paste cache while the images closed went unnoticed. The after-close check now also looks for the vault's pastes, from the final plan and from vault lines still in the shared history, and for leftover temp files.
+- `lock` on a vault that was already closed reported success without looking at anything. It now checks the shared files and reports traces it finds under `traces_outside` (exit 1, "unlock, then lock to sweep them"), unless `--skip-sweep`. `not_mode_000` now covers every closed folder that is not mode 000, not only the ones closed in that run.
+- With the whole Claude Code projects folder in the vault, no session was found, so every session's file-history stayed outside. Every project folder in it is now read for sessions; one that can't be read, or is a symlink, makes the sweep incomplete.
+- A failure while preparing a mountpoint during `unlock` (a permission error, Ctrl-C) left mountpoints already prepared writable, and showed a traceback. Preparation now runs inside the same cleanup as the prompt and attach: a filesystem error is reported under `failed`, and every folder it touched that did not unlock goes back to mode 000.
+
 ## 0.1.13 — 2026-11-16
 
 ### Added

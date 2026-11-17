@@ -62,6 +62,8 @@ the sweep refuses one rather than write outside the image. `verify` leaves this
 folder out of both the checksum list and the folder it checks.
 
 - `history.jsonl`: swept lines, byte-for-byte, appended without duplicates.
+- `history-overflow.jsonl` (only after a failure): lines for other projects written during a history rewrite
+  that could not go back into the shared history because its disk was full. `restore-history` merges them back.
 - `paste-cache/<hash>.txt`: paste files only vaulted lines referenced.
 - `file-history/<sessionId>/`: edit backups for the vault's sessions.
 
